@@ -223,3 +223,34 @@ def test_broken_sources_detected() -> None:
     model = build_model()
     broken = model.broken_sources({"sensor.l1_voltage"})
     assert {item.id for item in broken} == {"boiler_temp", "leak"}
+
+def test_remove_measurement_blocks_composite_dependents() -> None:
+    model = build_model()
+    from core.model import Composite, CompositeOperation
+
+    model.add_measurement(
+        Measurement(
+            id="voltage_sum",
+            name="Сумма фаз",
+            unit="V",
+            system_id="power",
+            composite=Composite(CompositeOperation.SUM, ("voltage_l1",)),
+        )
+    )
+    with pytest.raises(ModelError):
+        model.remove_measurement("voltage_l1")
+    model.remove_measurement("voltage_sum")
+    removed = model.remove_measurement("voltage_l1")
+    assert removed.id == "voltage_l1"
+    assert model.measurement("voltage_l1") is None
+
+
+def test_remove_system_cascades_without_touching_entities() -> None:
+    model = build_model()
+    model.add_relationship(Relationship("rel", RelationType.MEASURES, "boiler_temp", "heating"))
+    removed = model.remove_system("heating")
+    assert removed.id == "heating"
+    assert "heating" not in model.systems
+    assert all(item.system_id != "heating" for item in model.measurements.values())
+    assert model.relationships == ()
+    assert model.measurement("voltage_l1") is not None

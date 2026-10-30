@@ -52,7 +52,9 @@ from .core import (
     Incident,
     IncidentManager,
     Locale,
+    Measurement,
     MeasurementFact,
+    MeasurementRole,
     MessagePriority,
     NotificationQueue,
     Observation,
@@ -67,9 +69,14 @@ from .core import (
     RuleEventKind,
     RuleRuntime,
     Severity,
+    Site,
     SmartAnalystError,
+    SourceRef,
     StorageError,
+    System,
+    SystemPreset,
     SystemSection,
+    ValidationStatus,
     Window,
     build_observation,
     build_package,
@@ -77,8 +84,10 @@ from .core import (
     evaluate_rule,
     export_configuration,
     load_config,
+    new_identifier,
     parse_payload,
     parse_rule,
+    referenced_measurements,
     render_report,
     validate_response,
 )
@@ -251,10 +260,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         self._apply_settings()
         self._parse_rules()
         self._restore_runtimes(dt_util.utcnow())
-        for unsubscribe in self._unsubs:
-            unsubscribe()
-        self._unsubs.clear()
-        self._subscribe()
+        self._resubscribe()
         self._schedule_save()
         await self._async_evaluate()
 
@@ -263,6 +269,158 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         self._apply_settings()
         self._schedule_save()
         await self._async_evaluate()
+
+    # -- редактирование модели (ENT-03, UI-04) ------------------------
+    def _resubscribe(self) -> None:
+        for unsubscribe in self._unsubs:
+            unsubscribe()
+        self._unsubs.clear()
+        self._subscribe()
+
+    def _ensure_site(self) -> Site:
+        if self.model.site is None:
+            self.model.set_site(
+                Site(id=new_identifier(), name=self.entry.title or "Дом")
+            )
+        assert self.model.site is not None
+        return self.model.site
+
+    async def _after_model_change(self) -> None:
+        self._parse_rules()
+        self._resubscribe()
+        self._schedule_save()
+        await self._async_evaluate()
+
+    async def async_create_system(self, name: str, preset: str = "custom") -> System:
+        """Создать систему руками или по подтверждённой подсказке."""
+        cleaned = name.strip()
+        if not cleaned:
+            raise SmartAnalystError("название системы не может быть пустым")
+        try:
+            preset_value = SystemPreset(preset)
+        except ValueError as err:
+            raise SmartAnalystError(f"неизвестный пресет системы {preset!r}") from err
+        site = self._ensure_site()
+        system = System(
+            id=new_identifier(),
+            site_id=site.id,
+            name=cleaned,
+            preset=preset_value,
+            config_status=ValidationStatus.CONFIRMED,
+        )
+        self.model.add_system(system)
+        await self._after_model_change()
+        return system
+
+    async def async_delete_system(self, system_id: str) -> None:
+        """Удалить систему; правила, зависящие от её датчиков, блокируют действие."""
+        measurement_ids = {item.id for item in self.model.measurements_of(system_id)}
+        for rule in self.rules.values():
+            if set(referenced_measurements(rule.expression)) & measurement_ids:
+                raise SmartAnalystError(
+                    f"правило {rule.name!r} использует датчики этой системы"
+                )
+        self.model.remove_system(system_id)
+        await self._after_model_change()
+
+    async def async_add_measurement(
+        self,
+        *,
+        system_id: str,
+        entity_id: str,
+        name: str | None = None,
+        role: str = "custom",
+        unit: str | None = None,
+        registry_entry_id: str | None = None,
+        attribute: str | None = None,
+    ) -> Measurement:
+        """Добавить сущность в систему с подтверждённой ролью (ENT-02)."""
+        if self.model.systems.get(system_id) is None:
+            raise SmartAnalystError(f"неизвестная система {system_id!r}")
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            raise SmartAnalystError(f"сущность {entity_id!r} не найдена в Home Assistant")
+        try:
+            role_value = MeasurementRole(role)
+        except ValueError as err:
+            raise SmartAnalystError(f"неизвестная роль измерения {role!r}") from err
+        measurement = Measurement(
+            id=new_identifier(),
+            name=(name or state.name or entity_id).strip(),
+            role=role_value,
+            unit=unit or state.attributes.get("unit_of_measurement"),
+            system_id=system_id,
+            source=SourceRef(
+                entity_id=entity_id,
+                registry_entry_id=registry_entry_id,
+                attribute=attribute,
+            ),
+            config_status=ValidationStatus.CONFIRMED,
+        )
+        self.model.add_measurement(measurement)
+        await self._after_model_change()
+        return measurement
+
+    async def async_delete_measurement(self, measurement_id: str) -> None:
+        """Удалить измерение, если на него не ссылаются правила и составные источники."""
+        for rule in self.rules.values():
+            if measurement_id in referenced_measurements(rule.expression):
+                raise SmartAnalystError(f"правило {rule.name!r} использует этот датчик")
+        self.model.remove_measurement(measurement_id)
+        await self._after_model_change()
+
+    async def async_save_rule(self, payload: dict[str, Any]) -> Rule:
+        """Проверить и сохранить правило (RULE-08, CFG-05)."""
+        rule = parse_rule(payload, self.model)
+        canonical = rule.to_dict()
+        replaced = False
+        for index, existing in enumerate(self.config_state.rules):
+            if str(existing.get("id")) == rule.id:
+                self.config_state.rules[index] = canonical
+                replaced = True
+                break
+        if not replaced:
+            self.config_state.rules.append(canonical)
+            self.runtimes.setdefault(rule.id, RuleRuntime(rule.id))
+        self._parse_rules()
+        self._schedule_save()
+        await self._async_evaluate()
+        return rule
+
+    async def async_delete_rule(self, rule_id: str) -> None:
+        """Удалить правило; инциденты и журнал остаются историей."""
+        before = len(self.config_state.rules)
+        self.config_state.rules = [
+            item for item in self.config_state.rules if str(item.get("id")) != rule_id
+        ]
+        if len(self.config_state.rules) == before:
+            raise SmartAnalystError(f"правило {rule_id!r} не найдено")
+        self.rules.pop(rule_id, None)
+        self.runtimes.pop(rule_id, None)
+        self._schedule_save()
+        await self._async_evaluate()
+
+    async def async_save_profile(self, payload: dict[str, Any]) -> ReportProfile:
+        """Сохранить профиль отчёта (REP-01)."""
+        profile = ReportProfile.from_dict(payload)
+        stored = profile.to_dict()
+        for index, existing in enumerate(self.config_state.report_profiles):
+            if str(existing.get("id")) == profile.id:
+                self.config_state.report_profiles[index] = stored
+                break
+        else:
+            self.config_state.report_profiles.append(stored)
+        self._schedule_save()
+        return profile
+
+    async def async_delete_profile(self, profile_id: str) -> None:
+        before = len(self.config_state.report_profiles)
+        self.config_state.report_profiles = [
+            item for item in self.config_state.report_profiles if str(item.get("id")) != profile_id
+        ]
+        if len(self.config_state.report_profiles) == before:
+            raise SmartAnalystError(f"профиль {profile_id!r} не найден")
+        self._schedule_save()
 
     # -- оценка -------------------------------------------------------
     def build_observations(self, now: datetime) -> dict[str, Observation]:

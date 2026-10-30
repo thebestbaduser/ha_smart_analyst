@@ -477,6 +477,57 @@ class HomeModel:
             stack.extend(graph.get(current, ()))
         return False
 
+    def remove_measurement(self, measurement_id: str) -> Measurement:
+        """Удалить измерение; составные источники, зависящие от него, блокируют удаление."""
+        measurement = self.require_measurement(measurement_id)
+        dependents = [
+            other
+            for other in self.measurements.values()
+            if other.composite and measurement_id in other.composite.operands
+        ]
+        if dependents:
+            names = ", ".join(item.name for item in dependents)
+            raise ModelError(
+                f"измерение {measurement.name!r} используется составными источниками: {names}"
+            )
+        self._relationships = {
+            key: value
+            for key, value in self._relationships.items()
+            if measurement_id not in {value.source_id, value.target_id}
+        }
+        del self.measurements[measurement_id]
+        return measurement
+
+    def remove_system(self, system_id: str) -> System:
+        """Удалить систему вместе с её оборудованием и измерениями.
+
+        Удаляется только описание в модели: сами сущности Home Assistant не
+        затрагиваются (SEM-05).
+        """
+        system = self.systems.get(system_id)
+        if system is None:
+            raise ModelError(f"неизвестная система {system_id!r}")
+        for measurement in [item for item in self.measurements.values() if item.system_id == system_id]:
+            self.remove_measurement(measurement.id)
+        self.equipment = {
+            key: value for key, value in self.equipment.items() if value.system_id != system_id
+        }
+        self._relationships = {
+            key: value
+            for key, value in self._relationships.items()
+            if system_id not in {value.source_id, value.target_id}
+        }
+        del self.systems[system_id]
+        return system
+
+    def composite_dependents(self, measurement_id: str) -> tuple[Measurement, ...]:
+        """Составные измерения, которые нельзя удалить без пересборки."""
+        return tuple(
+            other
+            for other in self.measurements.values()
+            if other.composite and measurement_id in other.composite.operands
+        )
+
     def systems_at(self, site_id: str) -> tuple[System, ...]:
         return tuple(system for system in self.systems.values() if system.site_id == site_id)
 

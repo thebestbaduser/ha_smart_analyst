@@ -1,3 +1,53 @@
+const ROLES = [
+  ["custom", "custom"],
+  ["actual", "actual"],
+  ["setpoint", "setpoint"],
+  ["supply", "supply"],
+  ["return", "return"],
+  ["power", "power"],
+  ["energy", "energy"],
+  ["voltage_phase", "voltage_phase"],
+  ["mode", "mode"],
+  ["running", "running"],
+  ["fault", "fault"],
+  ["flow", "flow"],
+  ["pressure", "pressure"],
+  ["temperature_indoor", "temperature_indoor"],
+  ["temperature_outdoor", "temperature_outdoor"],
+  ["occupancy", "occupancy"],
+  ["leak", "leak"],
+];
+
+const PRESETS = [
+  ["custom", "Пользовательская"],
+  ["heating", "Отопление"],
+  ["dhw", "ГВС"],
+  ["floor_heating", "Тёплый пол"],
+  ["radiators", "Радиаторы"],
+  ["electricity", "Электрика"],
+  ["energy", "Энергоучёт"],
+  ["water", "Вода"],
+  ["climate", "Климат"],
+  ["ventilation", "Вентиляция"],
+  ["security", "Безопасность"],
+  ["lighting", "Освещение"],
+];
+
+const OPERATORS = [
+  ["gt", "больше"],
+  ["ge", "больше или равно"],
+  ["lt", "меньше"],
+  ["le", "меньше или равно"],
+  ["eq", "равно"],
+  ["ne", "не равно"],
+];
+
+const SEVERITIES = [
+  ["warning", "предупреждение"],
+  ["critical", "критично"],
+  ["info", "информация"],
+];
+
 class HaSmartAnalystPanel extends HTMLElement {
   constructor() {
     super();
@@ -5,6 +55,13 @@ class HaSmartAnalystPanel extends HTMLElement {
     this._tab = "overview";
     this._data = null;
     this._error = null;
+    this._flash = null;
+    this._dialog = null;
+    this._dialogSystemId = null;
+    this._entities = null;
+    this._entitiesLoading = false;
+    this._entityQuery = "";
+    this._reportText = "";
   }
 
   set hass(hass) {
@@ -23,6 +80,7 @@ class HaSmartAnalystPanel extends HTMLElement {
     this._render();
   }
 
+  // -- данные ---------------------------------------------------------
   async _load() {
     if (!this.hass) {
       return;
@@ -31,11 +89,284 @@ class HaSmartAnalystPanel extends HTMLElement {
       this._data = await this.hass.callWS({ type: "ha_smart_analyst/overview" });
       this._error = null;
     } catch (err) {
-      this._error = err && err.message ? err.message : String(err);
+      this._error = this._message(err);
     }
     this._render();
   }
 
+  async _loadEntities() {
+    if (!this.hass) {
+      return;
+    }
+    this._entitiesLoading = true;
+    this._render();
+    try {
+      this._entities = await this.hass.callWS({
+        type: "ha_smart_analyst/entities",
+        query: this._entityQuery || undefined,
+        only_unused: true,
+        limit: 100,
+      });
+    } catch (err) {
+      this._flash = { type: "error", text: this._message(err) };
+      this._entities = { entities: [], total: 0, unavailable: 0 };
+    }
+    this._entitiesLoading = false;
+    this._render();
+  }
+
+  _message(err) {
+    if (!err) {
+      return "неизвестная ошибка";
+    }
+    if (err.message) {
+      return err.message;
+    }
+    if (err.error && err.error.message) {
+      return err.error.message;
+    }
+    return String(err);
+  }
+
+  _ok(text) {
+    this._flash = { type: "ok", text };
+    this._render();
+  }
+
+  _fail(err) {
+    this._flash = { type: "error", text: this._message(err) };
+    this._render();
+  }
+
+  // -- действия -------------------------------------------------------
+  _open(dialog, systemId = null) {
+    this._dialog = dialog;
+    this._dialogSystemId = systemId;
+    this._flash = null;
+    if (dialog === "entity") {
+      this._entities = null;
+      this._loadEntities();
+    } else {
+      this._render();
+    }
+  }
+
+  _close() {
+    this._dialog = null;
+    this._dialogSystemId = null;
+    this._entities = null;
+    this._render();
+  }
+
+  async _call(type, payload) {
+    return this.hass.callWS({ type: `ha_smart_analyst/${type}`, ...payload });
+  }
+
+  async _submitSystem() {
+    const name = this.shadowRoot.querySelector("#system-name").value.trim();
+    const preset = this.shadowRoot.querySelector("#system-preset").value;
+    try {
+      await this._call("system/create", { name, preset });
+      this._dialog = null;
+      await this._load();
+      this._ok(`Система «${name}» добавлена`);
+    } catch (err) {
+      this._fail(err);
+    }
+  }
+
+  async _deleteSystem(systemId) {
+    if (!window.confirm("Удалить систему вместе с её датчиками? Сущности Home Assistant останутся.")) {
+      return;
+    }
+    try {
+      await this._call("system/delete", { system_id: systemId });
+      await this._load();
+      this._ok("Система удалена");
+    } catch (err) {
+      this._fail(err);
+    }
+  }
+
+  async _addMeasurement(button) {
+    const dataset = button.dataset;
+    try {
+      await this._call("measurement/add", {
+        system_id: this._dialogSystemId,
+        entity_id: dataset.entity,
+        name: dataset.name || undefined,
+        role: dataset.role || "custom",
+        unit: dataset.unit || undefined,
+        registry_entry_id: dataset.registry || undefined,
+      });
+      this._ok(`Датчик «${dataset.name || dataset.entity}» добавлен`);
+      await this._load();
+      await this._loadEntities();
+    } catch (err) {
+      this._fail(err);
+    }
+  }
+
+  async _deleteMeasurement(measurementId) {
+    if (!window.confirm("Удалить датчик из системы?")) {
+      return;
+    }
+    try {
+      await this._call("measurement/delete", { measurement_id: measurementId });
+      await this._load();
+      this._ok("Датчик удалён");
+    } catch (err) {
+      this._fail(err);
+    }
+  }
+
+  async _submitRule() {
+    const root = this.shadowRoot;
+    const name = root.querySelector("#rule-name").value.trim();
+    const severity = root.querySelector("#rule-severity").value;
+    const measurementId = root.querySelector("#rule-measurement").value;
+    const op = root.querySelector("#rule-op").value;
+    const threshold = parseFloat(root.querySelector("#rule-threshold").value);
+    const forSeconds = parseInt(root.querySelector("#rule-for").value || "0", 10);
+    const clearValue = root.querySelector("#rule-clear").value;
+    const stableSeconds = parseInt(root.querySelector("#rule-stable").value || "0", 10);
+    const measurement = this._findMeasurement(measurementId);
+    const unit = measurement ? measurement.unit : undefined;
+    const expression = {
+      op,
+      left: { measurement_id: measurementId },
+      right: { value: threshold, unit: unit || undefined },
+    };
+    const payload = {
+      id: `rule_${Math.random().toString(36).slice(2, 10)}`,
+      name,
+      severity,
+      expression,
+      for_seconds: Number.isFinite(forSeconds) ? forSeconds : 0,
+      scope_id: measurement ? measurement.system_id : undefined,
+      missing_data_policy: "unknown",
+    };
+    if (!Number.isFinite(threshold)) {
+      this._fail("порог должен быть числом");
+      return;
+    }
+    if (clearValue !== "" && Number.isFinite(parseFloat(clearValue))) {
+      const recovery = {
+        stable_seconds: Number.isFinite(stableSeconds) ? stableSeconds : 0,
+        measurement_id: measurementId,
+      };
+      if (op === "gt" || op === "ge") {
+        recovery.clear_below = { value: parseFloat(clearValue), unit: unit || undefined };
+      } else if (op === "lt" || op === "le") {
+        recovery.clear_above = { value: parseFloat(clearValue), unit: unit || undefined };
+      }
+      if (recovery.clear_below || recovery.clear_above) {
+        payload.recovery = recovery;
+      }
+    }
+    try {
+      await this._call("rule/save", { rule: payload });
+      this._dialog = null;
+      await this._load();
+      this._ok(`Правило «${name}» сохранено`);
+    } catch (err) {
+      this._fail(err);
+    }
+  }
+
+  async _testRule(ruleId) {
+    try {
+      const result = await this._call("rule_test", { rule_id: ruleId });
+      const value = result.value === null ? "UNKNOWN" : String(result.value);
+      const reasons = (result.reasons || []).map((item) => item.message).join("; ");
+      this._ok(`Результат: ${value}${reasons ? " — " + reasons : ""}`);
+    } catch (err) {
+      this._fail(err);
+    }
+  }
+
+  async _deleteRule(ruleId) {
+    if (!window.confirm("Удалить правило? Журнал инцидентов останется.")) {
+      return;
+    }
+    try {
+      await this._call("rule/delete", { rule_id: ruleId });
+      await this._load();
+      this._ok("Правило удалено");
+    } catch (err) {
+      this._fail(err);
+    }
+  }
+
+  async _submitProfile() {
+    const root = this.shadowRoot;
+    const name = root.querySelector("#profile-name").value.trim();
+    const locale = root.querySelector("#profile-locale").value;
+    const detail = root.querySelector("#profile-detail").value;
+    try {
+      await this._call("profile/save", {
+        profile: {
+          id: `profile_${Math.random().toString(36).slice(2, 10)}`,
+          name,
+          locale,
+          detail,
+          timezone: this.hass.config.time_zone,
+          report_type: "scheduled",
+        },
+      });
+      this._dialog = null;
+      await this._load();
+      this._ok(`Профиль «${name}» сохранён`);
+    } catch (err) {
+      this._fail(err);
+    }
+  }
+
+  async _generateReport(profileId) {
+    try {
+      const response = await this.hass.callService(
+        "ha_smart_analyst",
+        "generate_report",
+        { profile_id: profileId },
+        undefined,
+        false,
+        true
+      );
+      this._reportText = response ? response.text : "";
+      this._open("report");
+    } catch (err) {
+      this._fail(err);
+    }
+  }
+
+  async _acknowledge(incidentId) {
+    try {
+      await this.hass.callService("ha_smart_analyst", "acknowledge_incident", {
+        incident_id: incidentId,
+        by: "panel",
+      });
+      await this._load();
+      this._ok("Инцидент принят; он остаётся активным до восстановления");
+    } catch (err) {
+      this._fail(err);
+    }
+  }
+
+  _findMeasurement(measurementId) {
+    if (!this._data) {
+      return null;
+    }
+    for (const system of this._data.systems) {
+      for (const measurement of system.measurements) {
+        if (measurement.id === measurementId) {
+          return { ...measurement, system_id: system.id };
+        }
+      }
+    }
+    return null;
+  }
+
+  // -- отрисовка ------------------------------------------------------
   _tabs() {
     return [
       ["overview", "Обзор"],
@@ -52,9 +383,6 @@ class HaSmartAnalystPanel extends HTMLElement {
   }
 
   _render() {
-    if (!this.shadowRoot) {
-      return;
-    }
     const data = this._data;
     const tabs = this._tabs()
       .map(
@@ -63,18 +391,24 @@ class HaSmartAnalystPanel extends HTMLElement {
       )
       .join("");
     let body = "";
-    if (this._error) {
+    if (this._dialog) {
+      body = this._renderDialog();
+    } else if (this._error) {
       body = `<p class="error" role="alert">Не удалось загрузить данные: ${this._escape(this._error)}</p>`;
     } else if (!data) {
       body = `<p class="muted">Загрузка…</p>`;
     } else {
       body = this._renderTab(data);
     }
+    const flash = this._flash
+      ? `<p class="${this._flash.type === "error" ? "error" : "ok"}" role="status">${this._escape(this._flash.text)}</p>`
+      : "";
     this.shadowRoot.innerHTML = `
       <style>
         :host { display: block; padding: 16px; color: var(--primary-text-color); }
         h1 { font-size: 1.4rem; margin: 0 0 12px; }
-        .tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--divider-color); margin-bottom: 16px; }
+        h2 { font-size: 1.1rem; margin: 16px 0 8px; }
+        .tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--divider-color); margin-bottom: 12px; }
         .tab { font: inherit; padding: 8px 12px; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--secondary-text-color); cursor: pointer; border-radius: 6px 6px 0 0; transition: background-color 150ms ease, color 150ms ease; }
         .tab:hover { background: var(--secondary-background-color); }
         .tab:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
@@ -87,27 +421,152 @@ class HaSmartAnalystPanel extends HTMLElement {
         .card .value { font-size: 1.6rem; font-weight: 600; }
         .muted { color: var(--secondary-text-color); }
         .error { color: var(--error-color); }
-        .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.8rem; background: var(--secondary-background-color); }
-        .critical { background: var(--error-color); color: #fff; }
-        .warning { background: var(--warning-color, #ffa600); color: #1b1b1b; }
+        .ok { color: var(--success-color, #0a7d33); }
+        .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin: 8px 0; }
+        label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--secondary-text-color); }
+        input, select, textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--divider-color); border-radius: 6px; background: var(--card-background-color); color: var(--primary-text-color); min-width: 120px; }
+        input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 1px; }
+        button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--divider-color); background: var(--card-background-color); color: var(--primary-text-color); cursor: pointer; transition: background-color 150ms ease; }
+        button:hover { background: var(--secondary-background-color); }
+        button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+        button.primary { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: var(--primary-color); }
+        button.danger { color: var(--error-color); }
+        .chip { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.8rem; background: var(--secondary-background-color); margin-right: 4px; }
+        .chip.high { background: var(--primary-color); color: var(--text-primary-color, #fff); }
+        pre { white-space: pre-wrap; font-family: inherit; background: var(--secondary-background-color); padding: 12px; border-radius: 8px; }
         @media (max-width: 600px) { :host { padding: 8px; } th, td { padding: 4px; } }
       </style>
       <h1>HA Smart Analyst</h1>
       <div class="tabs" role="tablist">${tabs}</div>
+      ${flash}
       <div role="tabpanel">${body}</div>
     `;
-    this.shadowRoot.querySelectorAll(".tab").forEach((button) => {
-      button.addEventListener("click", () => {
-        this._tab = button.dataset.tab;
-        this._render();
-      });
-      button.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          button.click();
-        }
-      });
-    });
+    this._bind();
+  }
+
+  _renderDialog() {
+    if (this._dialog === "system") {
+      return `<div class="card">
+        <h2>Новая система</h2>
+        <div class="row">
+          <label>Название<input id="system-name" value="Отопление"></label>
+          <label>Тип<select id="system-preset">${PRESETS.map(
+            ([value, label]) => `<option value="${value}"${value === "heating" ? " selected" : ""}>${label}</option>`
+          ).join("")}</select></label>
+          <button class="primary" data-action="submit-system">Создать</button>
+          <button data-action="close">Отмена</button>
+        </div>
+      </div>`;
+    }
+    if (this._dialog === "entity") {
+      return this._renderPicker();
+    }
+    if (this._dialog === "rule") {
+      return this._renderRuleDialog();
+    }
+    if (this._dialog === "profile") {
+      return `<div class="card">
+        <h2>Новый профиль отчёта</h2>
+        <div class="row">
+          <label>Название<input id="profile-name" value="Вечерний отчёт"></label>
+          <label>Язык<select id="profile-locale"><option value="ru">ru</option><option value="en">en</option></select></label>
+          <label>Детализация<select id="profile-detail">
+            <option value="adaptive">adaptive</option>
+            <option value="compact">compact</option>
+            <option value="standard">standard</option>
+            <option value="detailed">detailed</option>
+          </select></label>
+          <button class="primary" data-action="submit-profile">Сохранить</button>
+          <button data-action="close">Отмена</button>
+        </div>
+      </div>`;
+    }
+    if (this._dialog === "report") {
+      return `<div class="card">
+        <h2>Отчёт</h2>
+        <pre>${this._escape(this._reportText)}</pre>
+        <button data-action="close">Закрыть</button>
+      </div>`;
+    }
+    return "";
+  }
+
+  _renderPicker() {
+    if (this._entitiesLoading || this._entities === null) {
+      return `<div class="card"><p class="muted">Загрузка каталога…</p><button data-action="close">Отмена</button></div>`;
+    }
+    const entities = this._entities.entities || [];
+    const rows = entities
+      .map((item) => {
+        const suggestion = item.suggestion || {};
+        const high = (suggestion.confidence || 0) >= 0.6;
+        return `<tr>
+          <td>${this._escape(item.name)}<br><span class="muted">${this._escape(item.entity_id)}</span></td>
+          <td>${this._escape(item.unit || "—")}</td>
+          <td><span class="chip ${high ? "high" : ""}">${this._escape(suggestion.role || "custom")}</span>
+              <span class="chip">${this._escape(suggestion.preset || "custom")}</span>
+              ${Math.round((suggestion.confidence || 0) * 100)}%</td>
+          <td class="muted">${this._escape(suggestion.reason || "")}</td>
+          <td><button class="primary" data-action="add-measurement"
+              data-entity="${this._escape(item.entity_id)}"
+              data-name="${this._escape(suggestion.suggested_name || item.name)}"
+              data-role="${this._escape(suggestion.role || "custom")}"
+              data-unit="${this._escape(item.unit || "")}"
+              data-registry="${this._escape(item.registry_entry_id || "")}">Добавить</button></td>
+        </tr>`;
+      })
+      .join("");
+    return `<div class="card">
+      <h2>Добавить датчик</h2>
+      <div class="row">
+        <label>Поиск<input id="entity-filter" value="${this._escape(this._entityQuery)}" placeholder="имя, entity_id, устройство"></label>
+        <button data-action="filter-entities">Найти</button>
+        <button data-action="close">Готово</button>
+      </div>
+      <p class="muted">Найдено: ${entities.length} из ${this._entities.total || 0}. Подсказка — предположение, проверьте роль перед добавлением.</p>
+      <table><thead><tr><th>Сущность</th><th>Ед.</th><th>Подсказка</th><th>Причина</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="5" class="muted">Ничего не найдено</td></tr>'}</tbody></table>
+    </div>`;
+  }
+
+  _renderRuleDialog() {
+    const options = [];
+    for (const system of this._data ? this._data.systems : []) {
+      for (const measurement of system.measurements) {
+        options.push(
+          `<option value="${this._escape(measurement.id)}" data-unit="${this._escape(measurement.unit || "")}">
+            ${this._escape(system.name)} → ${this._escape(measurement.name)} (${this._escape(measurement.unit || "—")})
+          </option>`
+        );
+      }
+    }
+    if (!options.length) {
+      return `<div class="card"><p class="muted">Сначала добавьте хотя бы один датчик.</p><button data-action="close">Закрыть</button></div>`;
+    }
+    return `<div class="card">
+      <h2>Новое правило</h2>
+      <div class="row">
+        <label>Название<input id="rule-name" value="Порог датчика"></label>
+        <label>Критичность<select id="rule-severity">${SEVERITIES.map(
+          ([value, label]) => `<option value="${value}">${label}</option>`
+        ).join("")}</select></label>
+      </div>
+      <div class="row">
+        <label>Датчик<select id="rule-measurement">${options.join("")}</select></label>
+        <label>Условие<select id="rule-op">${OPERATORS.map(
+          ([value, label]) => `<option value="${value}">${label}</option>`
+        ).join("")}</select></label>
+        <label>Порог<input id="rule-threshold" type="number" step="any" value="245"></label>
+        <label>Держать, с<input id="rule-for" type="number" min="0" value="30"></label>
+      </div>
+      <div class="row">
+        <label>Порог восстановления<input id="rule-clear" type="number" step="any" placeholder="необязательно"></label>
+        <label>Стабильно, с<input id="rule-stable" type="number" min="0" value="60"></label>
+        <button class="primary" data-action="submit-rule">Сохранить</button>
+        <button data-action="close">Отмена</button>
+      </div>
+      <p class="muted">Пороги задаёте вы: значения по умолчанию — только пример, не рекомендация по безопасности.</p>
+    </div>`;
   }
 
   _renderTab(data) {
@@ -122,31 +581,11 @@ class HaSmartAnalystPanel extends HTMLElement {
           data.relationships.map((item) => [item.id, item.type, item.source_id, item.target_id])
         );
       case "rules":
-        return this._table(
-          ["Правило", "Критичность", "Состояние", "Включено", "Политика данных"],
-          data.rules.map((rule) => [rule.name, rule.severity, rule.state, rule.enabled ? "да" : "нет", rule.missing_data_policy])
-        );
+        return this._rules(data);
       case "incidents":
-        return data.incidents.length
-          ? this._table(
-              ["Правило", "Критичность", "Состояние", "Открыт", "Пик", "Принято"],
-              data.incidents.map((item) => [
-                item.rule,
-                item.severity,
-                item.state,
-                item.opened_at,
-                item.peak_deviation === null ? "—" : `${item.peak_deviation} ${item.peak_unit || ""}`,
-                item.acknowledged ? "да" : "нет",
-              ])
-            )
-          : `<p class="muted">Активных инцидентов нет.</p>`;
+        return this._incidents(data);
       case "reports":
-        return data.reports.length
-          ? this._table(
-              ["Профиль", "Детализация", "Язык", "Тип"],
-              data.reports.map((item) => [item.name, item.detail, item.locale, item.report_type])
-            )
-          : `<p class="muted">Профили отчётов ещё не созданы.</p>`;
+        return this._reports(data);
       case "ai":
         return `<div class="grid">
           <div class="card"><div class="muted">Провайдер</div><div class="value">${this._escape(data.ai.model || "—")}</div></div>
@@ -188,36 +627,199 @@ class HaSmartAnalystPanel extends HTMLElement {
   }
 
   _systems(data) {
+    const add = `<div class="row"><button class="primary" data-action="new-system">Добавить систему</button></div>`;
     if (!data.systems.length) {
-      return `<p class="muted">Системы не созданы. Добавьте их в настройках интеграции.</p>`;
+      return `${add}<p class="muted">Систем пока нет. Начните с «Отопление» или «Электрика».</p>`;
     }
-    return data.systems
-      .map(
-        (system) => `<h2>${this._escape(system.name)}</h2>${this._table(
-          ["Измерение", "Роль", "Значение", "Качество", "Сущность"],
-          system.measurements.map((item) => [
-            item.name,
-            item.role,
-            item.value === null ? "—" : `${item.value} ${item.unit || ""}`,
-            item.quality,
-            item.entity_id || "—",
-          ])
-        )}`
+    return (
+      add +
+      data.systems
+        .map(
+          (system) => `<h2>${this._escape(system.name)}
+            <button data-action="add-entity" data-system="${this._escape(system.id)}">Добавить датчик</button>
+            <button class="danger" data-action="delete-system" data-system="${this._escape(system.id)}">Удалить систему</button>
+          </h2>${this._table(
+            ["Измерение", "Роль", "Значение", "Качество", "Сущность", ""],
+            system.measurements.map((item) => [
+              item.name,
+              item.role,
+              item.value === null ? "—" : `${item.value} ${item.unit || ""}`,
+              item.quality,
+              item.entity_id || "—",
+              `<button class="danger" data-action="delete-measurement" data-measurement="${this._escape(item.id)}">Удалить</button>`,
+            ])
+          )}`
+        )
+        .join("")
+    );
+  }
+
+  _rules(data) {
+    const add = `<div class="row"><button class="primary" data-action="new-rule">Создать правило</button></div>`;
+    if (!data.rules.length) {
+      return `${add}<p class="muted">Правил нет. Правило — это условие по датчику с порогом и длительностью.</p>`;
+    }
+    return (
+      add +
+      this._table(
+        ["Правило", "Критичность", "Состояние", "Держать, с", "Политика данных", ""],
+        data.rules.map((rule) => [
+          rule.name,
+          rule.severity,
+          rule.state,
+          rule.for_seconds,
+          rule.missing_data_policy,
+          `<button data-action="test-rule" data-rule="${this._escape(rule.id)}">Тест</button>
+           <button class="danger" data-action="delete-rule" data-rule="${this._escape(rule.id)}">Удалить</button>`,
+        ])
       )
-      .join("");
+    );
+  }
+
+  _incidents(data) {
+    if (!data.incidents.length) {
+      return `<p class="muted">Инцидентов нет.</p>`;
+    }
+    return this._table(
+      ["Правило", "Критичность", "Состояние", "Открыт", "Пик", "Принято", ""],
+      data.incidents.map((item) => [
+        item.rule,
+        item.severity,
+        item.state,
+        item.opened_at,
+        item.peak_deviation === null ? "—" : `${item.peak_deviation} ${item.peak_unit || ""}`,
+        item.acknowledged ? "да" : "нет",
+        item.acknowledged
+          ? ""
+          : `<button data-action="ack" data-incident="${this._escape(item.incident_id)}">Принять</button>`,
+      ])
+    );
+  }
+
+  _reports(data) {
+    const add = `<div class="row"><button class="primary" data-action="new-profile">Новый профиль</button></div>`;
+    if (!data.reports.length) {
+      return `${add}<p class="muted">Профилей нет. Профиль задаёт язык, детализацию и получателей отчёта.</p>`;
+    }
+    return (
+      add +
+      this._table(
+        ["Профиль", "Детализация", "Язык", "Тип", ""],
+        data.reports.map((item) => [
+          item.name,
+          item.detail,
+          item.locale,
+          item.report_type,
+          `<button class="primary" data-action="generate-report" data-profile="${this._escape(item.id)}">Сформировать</button>`,
+        ])
+      )
+    );
   }
 
   _table(headers, rows) {
     const head = headers.map((header) => `<th scope="col">${this._escape(header)}</th>`).join("");
     const body = rows
-      .map(
-        (row) =>
-          `<tr>${row
-            .map((cell) => `<td>${this._escape(cell === null || cell === undefined ? "—" : String(cell))}</td>`)
-            .join("")}</tr>`
-      )
+      .map((row) => {
+        const cells = Array.isArray(row) ? row : [row];
+        return `<tr>${cells
+          .map((cell) => {
+            if (typeof cell === "string" && cell.startsWith("<button")) {
+              return `<td>${cell}</td>`;
+            }
+            return `<td>${this._escape(cell === null || cell === undefined ? "—" : String(cell))}</td>`;
+          })
+          .join("")}</tr>`;
+      })
       .join("");
     return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  }
+
+  _bind() {
+    const root = this.shadowRoot;
+    root.querySelectorAll(".tab").forEach((button) => {
+      button.addEventListener("click", () => {
+        this._tab = button.dataset.tab;
+        this._dialog = null;
+        this._render();
+      });
+      button.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          button.click();
+        }
+      });
+    });
+    root.querySelectorAll("[data-action]").forEach((element) => {
+      element.addEventListener("click", () => this._dispatch(element.dataset, element));
+    });
+    const filter = root.querySelector("#entity-filter");
+    if (filter) {
+      filter.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          this._entityQuery = filter.value;
+          this._loadEntities();
+        }
+      });
+    }
+  }
+
+  _dispatch(dataset, element) {
+    switch (dataset.action) {
+      case "new-system":
+        this._open("system");
+        break;
+      case "close":
+        this._close();
+        break;
+      case "submit-system":
+        this._submitSystem();
+        break;
+      case "add-entity":
+        this._open("entity", dataset.system);
+        break;
+      case "delete-system":
+        this._deleteSystem(dataset.system);
+        break;
+      case "add-measurement":
+        this._addMeasurement(element);
+        break;
+      case "delete-measurement":
+        this._deleteMeasurement(dataset.measurement);
+        break;
+      case "filter-entities": {
+        const input = this.shadowRoot.querySelector("#entity-filter");
+        this._entityQuery = input ? input.value : "";
+        this._loadEntities();
+        break;
+      }
+      case "new-rule":
+        this._open("rule");
+        break;
+      case "submit-rule":
+        this._submitRule();
+        break;
+      case "test-rule":
+        this._testRule(dataset.rule);
+        break;
+      case "delete-rule":
+        this._deleteRule(dataset.rule);
+        break;
+      case "new-profile":
+        this._open("profile");
+        break;
+      case "submit-profile":
+        this._submitProfile();
+        break;
+      case "generate-report":
+        this._generateReport(dataset.profile);
+        break;
+      case "ack":
+        this._acknowledge(dataset.incident);
+        break;
+      default:
+        break;
+    }
   }
 
   _escape(value) {

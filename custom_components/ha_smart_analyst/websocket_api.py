@@ -1,7 +1,8 @@
-"""WebSocket API для панели интеграции (UI-01).
+"""WebSocket API панели: просмотр, каталог и редактирование (UI-01…UI-04).
 
-Модель не получает свободного доступа к HA API: панель запрашивает только
-подготовленные срезы данных, а тест правила выполняется на сервере.
+Чтение — обзор и каталог сущностей. Изменения (системы, измерения, правила,
+профили) выполняются только администратором и проходят серверную валидацию:
+панель не может записать в хранилище правило, не прошедшее ``parse_rule``.
 """
 
 from __future__ import annotations
@@ -15,12 +16,23 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import SmartAnalystCoordinator
+from .core import CatalogFilter, SmartAnalystError, search, suggest
 from .core.observations import Quality
+from .entity_catalog import build_catalog
+
+ATTR_ENTRY_ID = "entry_id"
 
 
-def _first_coordinator(hass: HomeAssistant) -> SmartAnalystCoordinator | None:
+def _coordinator(hass: HomeAssistant, msg: dict[str, Any]) -> SmartAnalystCoordinator | None:
     entries: dict[str, SmartAnalystCoordinator] = hass.data.get(DOMAIN, {})
+    entry_id = msg.get(ATTR_ENTRY_ID)
+    if entry_id:
+        return entries.get(str(entry_id))
     return next(iter(entries.values())) if entries else None
+
+
+def _fail(connection: Any, msg: dict[str, Any], err: Exception) -> None:
+    connection.send_error(msg["id"], "invalid_request", str(err))
 
 
 def _overview_payload(coordinator: SmartAnalystCoordinator) -> dict[str, Any]:
@@ -128,15 +140,68 @@ def _overview_payload(coordinator: SmartAnalystCoordinator) -> dict[str, Any]:
     }
 
 
+# -- чтение -----------------------------------------------------------
 @callback
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/overview"})
 def websocket_overview(hass: HomeAssistant, connection, msg) -> None:
     """Срез данных для вкладок панели."""
-    coordinator = _first_coordinator(hass)
+    coordinator = _coordinator(hass, msg)
     if coordinator is None:
         connection.send_error(msg["id"], "not_found", "Интеграция не настроена")
         return
     connection.send_result(msg["id"], _overview_payload(coordinator))
+
+
+ENTITIES_SCHEMA = {
+    vol.Required("type"): f"{DOMAIN}/entities",
+    vol.Optional("query"): str,
+    vol.Optional("domains"): [str],
+    vol.Optional("unit"): str,
+    vol.Optional("device_class"): str,
+    vol.Optional("area_id"): str,
+    vol.Optional("device_id"): str,
+    vol.Optional("available"): bool,
+    vol.Optional("include_disabled", default=False): bool,
+    vol.Optional("only_unused", default=True): bool,
+    vol.Optional("limit", default=200): int,
+}
+
+
+@websocket_api.require_admin
+@callback
+@websocket_api.websocket_command(ENTITIES_SCHEMA)
+def websocket_entities(hass: HomeAssistant, connection, msg) -> None:
+    """Каталог сущностей с подсказками (ENT-01…ENT-03)."""
+    coordinator = _coordinator(hass, msg)
+    if coordinator is None:
+        connection.send_error(msg["id"], "not_found", "Интеграция не настроена")
+        return
+    catalog = build_catalog(hass)
+    criteria = CatalogFilter(
+        query=msg.get("query"),
+        domains=tuple(msg.get("domains") or ()),
+        unit=msg.get("unit"),
+        device_class=msg.get("device_class"),
+        area_id=msg.get("area_id"),
+        device_id=msg.get("device_id"),
+        available=msg.get("available"),
+        include_disabled=bool(msg.get("include_disabled", False)),
+    )
+    found = search(catalog, criteria, limit=int(msg.get("limit", 200)))
+    used = set(coordinator.model.canonical_entity_index())
+    if msg.get("only_unused", True):
+        found = [item for item in found if item.entity_id not in used]
+    connection.send_result(
+        msg["id"],
+        {
+            "entities": [
+                {**descriptor.to_dict(), "suggestion": suggest(descriptor).to_dict()}
+                for descriptor in found
+            ],
+            "total": len(catalog),
+            "unavailable": sum(1 for item in catalog if not item.available),
+        },
+    )
 
 
 @websocket_api.async_response
@@ -145,7 +210,7 @@ def websocket_overview(hass: HomeAssistant, connection, msg) -> None:
 )
 async def websocket_rule_test(hass: HomeAssistant, connection, msg) -> None:
     """Тест правила на текущем снимке (UI-03)."""
-    coordinator = _first_coordinator(hass)
+    coordinator = _coordinator(hass, msg)
     if coordinator is None:
         connection.send_error(msg["id"], "not_found", "Интеграция не настроена")
         return
@@ -168,10 +233,192 @@ async def websocket_rule_test(hass: HomeAssistant, connection, msg) -> None:
     )
 
 
+# -- системы и измерения ----------------------------------------------
+@websocket_api.require_admin
+@websocket_api.async_response
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/system/create",
+        vol.Required("name"): str,
+        vol.Optional("preset", default="custom"): str,
+    }
+)
+async def websocket_system_create(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass, msg)
+    if coordinator is None:
+        connection.send_error(msg["id"], "not_found", "Интеграция не настроена")
+        return
+    try:
+        system = await coordinator.async_create_system(msg["name"], msg.get("preset", "custom"))
+    except SmartAnalystError as err:
+        _fail(connection, msg, err)
+        return
+    connection.send_result(msg["id"], {"system": system.to_dict()})
+
+
+@websocket_api.require_admin
+@websocket_api.async_response
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/system/delete", vol.Required("system_id"): str}
+)
+async def websocket_system_delete(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass, msg)
+    if coordinator is None:
+        connection.send_error(msg["id"], "not_found", "Интеграция не настроена")
+        return
+    try:
+        await coordinator.async_delete_system(msg["system_id"])
+    except SmartAnalystError as err:
+        _fail(connection, msg, err)
+        return
+    connection.send_result(msg["id"], {"deleted": True})
+
+
+@websocket_api.require_admin
+@websocket_api.async_response
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/measurement/add",
+        vol.Required("system_id"): str,
+        vol.Required("entity_id"): str,
+        vol.Optional("name"): str,
+        vol.Optional("role", default="custom"): str,
+        vol.Optional("unit"): vol.Any(str, None),
+        vol.Optional("registry_entry_id"): vol.Any(str, None),
+        vol.Optional("attribute"): vol.Any(str, None),
+    }
+)
+async def websocket_measurement_add(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass, msg)
+    if coordinator is None:
+        connection.send_error(msg["id"], "not_found", "Интеграция не настроена")
+        return
+    try:
+        measurement = await coordinator.async_add_measurement(
+            system_id=msg["system_id"],
+            entity_id=msg["entity_id"],
+            name=msg.get("name"),
+            role=msg.get("role", "custom"),
+            unit=msg.get("unit"),
+            registry_entry_id=msg.get("registry_entry_id"),
+            attribute=msg.get("attribute"),
+        )
+    except SmartAnalystError as err:
+        _fail(connection, msg, err)
+        return
+    connection.send_result(msg["id"], {"measurement": measurement.to_dict()})
+
+
+@websocket_api.require_admin
+@websocket_api.async_response
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/measurement/delete", vol.Required("measurement_id"): str}
+)
+async def websocket_measurement_delete(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass, msg)
+    if coordinator is None:
+        connection.send_error(msg["id"], "not_found", "Интеграция не настроена")
+        return
+    try:
+        await coordinator.async_delete_measurement(msg["measurement_id"])
+    except SmartAnalystError as err:
+        _fail(connection, msg, err)
+        return
+    connection.send_result(msg["id"], {"deleted": True})
+
+
+# -- правила и профили ------------------------------------------------
+@websocket_api.require_admin
+@websocket_api.async_response
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/rule/save", vol.Required("rule"): dict}
+)
+async def websocket_rule_save(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass, msg)
+    if coordinator is None:
+        connection.send_error(msg["id"], "not_found", "Интеграция не настроена")
+        return
+    try:
+        rule = await coordinator.async_save_rule(dict(msg["rule"]))
+    except SmartAnalystError as err:
+        _fail(connection, msg, err)
+        return
+    connection.send_result(msg["id"], {"rule": rule.to_dict()})
+
+
+@websocket_api.require_admin
+@websocket_api.async_response
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/rule/delete", vol.Required("rule_id"): str}
+)
+async def websocket_rule_delete(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass, msg)
+    if coordinator is None:
+        connection.send_error(msg["id"], "not_found", "Интеграция не настроена")
+        return
+    try:
+        await coordinator.async_delete_rule(msg["rule_id"])
+    except SmartAnalystError as err:
+        _fail(connection, msg, err)
+        return
+    connection.send_result(msg["id"], {"deleted": True})
+
+
+@websocket_api.require_admin
+@websocket_api.async_response
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/profile/save", vol.Required("profile"): dict}
+)
+async def websocket_profile_save(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass, msg)
+    if coordinator is None:
+        connection.send_error(msg["id"], "not_found", "Интеграция не настроена")
+        return
+    try:
+        profile = await coordinator.async_save_profile(dict(msg["profile"]))
+    except (SmartAnalystError, ValueError) as err:
+        _fail(connection, msg, err)
+        return
+    connection.send_result(msg["id"], {"profile": profile.to_dict()})
+
+
+@websocket_api.require_admin
+@websocket_api.async_response
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/profile/delete", vol.Required("profile_id"): str}
+)
+async def websocket_profile_delete(hass: HomeAssistant, connection, msg) -> None:
+    coordinator = _coordinator(hass, msg)
+    if coordinator is None:
+        connection.send_error(msg["id"], "not_found", "Интеграция не настроена")
+        return
+    try:
+        await coordinator.async_delete_profile(msg["profile_id"])
+    except SmartAnalystError as err:
+        _fail(connection, msg, err)
+        return
+    connection.send_result(msg["id"], {"deleted": True})
+
+
+COMMANDS = (
+    websocket_overview,
+    websocket_entities,
+    websocket_rule_test,
+    websocket_system_create,
+    websocket_system_delete,
+    websocket_measurement_add,
+    websocket_measurement_delete,
+    websocket_rule_save,
+    websocket_rule_delete,
+    websocket_profile_save,
+    websocket_profile_delete,
+)
+
+
 async def async_register_websocket_api(hass: HomeAssistant) -> None:
     """Зарегистрировать команды один раз."""
     if hass.data.get(f"{DOMAIN}_ws"):
         return
-    websocket_api.async_register_command(hass, websocket_overview)
-    websocket_api.async_register_command(hass, websocket_rule_test)
+    for command in COMMANDS:
+        websocket_api.async_register_command(hass, command)
     hass.data[f"{DOMAIN}_ws"] = True

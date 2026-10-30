@@ -1,7 +1,7 @@
 {
   "domain": "ha_smart_analyst",
   "name": "HA Smart Analyst",
-  "codeowners": [],
+  "codeowners": ["@thebestbaduser"],
   "config_flow": true,
   "dependencies": ["http", "websocket_api"],
   "documentation": "https://github.com/thebestbaduser/ha_smart_analyst",
