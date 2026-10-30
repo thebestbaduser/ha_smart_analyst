@@ -322,6 +322,15 @@ def test_reference_systems_keep_their_own_values() -> None:
     assert "ГВС: 42,6" not in heating
 
 
+def test_standard_and_detailed_levels_differ() -> None:
+    standard = render_reference(DetailLevel.STANDARD).text
+    detailed = render_reference(DetailLevel.DETAILED).text
+
+    assert "покрытие истории" not in standard
+    assert "покрытие истории" in detailed
+    assert "Котёл − Цель котла" in standard
+
+
 def test_reference_fixture_matches_current_reports() -> None:
     expected = json.loads(FIXTURE.read_text(encoding="utf-8"))
     actual = {

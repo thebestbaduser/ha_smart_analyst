@@ -76,7 +76,7 @@ python -m pytest tests/ha -q
 node --test tests/frontend/*.test.mjs
 ```
 
-Проверено: **165 тестов ядра** и **195 тестов с Home Assistant** (0 падений) плюс
+Проверено: **166 тестов ядра** и **196 тестов с Home Assistant** (0 падений) плюс
 **7 тестов frontend-помощников** в Node на Python 3.12 и Home Assistant 2025.1.4;
 `ruff check` без замечаний; JSON-схемы и переводы валидны.
 Эталонный дом из 18 измерений и четыре уровня отчёта зафиксированы в

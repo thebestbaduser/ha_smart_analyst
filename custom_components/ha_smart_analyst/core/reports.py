@@ -597,23 +597,26 @@ def _format_value(value: object, unit: str | None, locale: Locale) -> str:
     return "—" if value is None else str(value)
 
 
-def _system_lines(system: SystemSection, locale: Locale, detailed: bool) -> list[str]:
+def _system_lines(system: SystemSection, locale: Locale, detail: DetailLevel) -> list[str]:
     lines = [f"• {system.name}"]
     for measurement in system.measurements:
         quality = (_QUALITY_RU if locale is Locale.RU else _QUALITY_EN)[measurement.quality]
         rendered = _format_value(measurement.value, measurement.unit, locale)
         suffix = "" if measurement.quality is Quality.OK else f" [{quality}]"
         lines.append(f"  – {measurement.name}: {rendered}{suffix}")
-    if detailed:
+    if detail in {DetailLevel.STANDARD, DetailLevel.DETAILED}:
         for fact in system.facts:
+            if detail is DetailLevel.STANDARD and fact.kind != "difference":
+                continue
             rendered = _format_value(fact.value, fact.unit, locale)
             lines.append(f"  · {fact.label or fact.id}: {rendered}")
-        trend = system.trend or ("нет данных" if locale is Locale.RU else "no data")
-        label = "покрытие истории" if locale is Locale.RU else "history coverage"
-        if system.coverage is None:
-            lines.append(f"  · {label}: — ({trend})")
-        else:
-            lines.append(f"  · {label}: {system.coverage:.0%}; {trend}")
+        if detail is DetailLevel.DETAILED:
+            trend = system.trend or ("нет данных" if locale is Locale.RU else "no data")
+            label = "покрытие истории" if locale is Locale.RU else "history coverage"
+            if system.coverage is None:
+                lines.append(f"  · {label}: — ({trend})")
+            else:
+                lines.append(f"  · {label}: {system.coverage:.0%}; {trend}")
     return lines
 
 
@@ -759,7 +762,6 @@ def render_report(
     )
     chosen = detail or choose_detail(profile, incidents, data_quality_issue)
     locale = profile.locale
-    detailed = chosen in {DetailLevel.STANDARD, DetailLevel.DETAILED}
     lines = _header(profile, package, now)
 
     if chosen is DetailLevel.COMPACT:
@@ -770,7 +772,7 @@ def render_report(
         for system in package.systems:
             if profile.system_ids and system.id not in profile.system_ids:
                 continue
-            lines.extend(_system_lines(system, locale, detailed))
+            lines.extend(_system_lines(system, locale, chosen))
 
     lines.extend(_incident_lines(incidents, locale))
 
