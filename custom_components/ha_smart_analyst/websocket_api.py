@@ -14,9 +14,9 @@ from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
+from .const import DOMAIN, VERSION
 from .coordinator import SmartAnalystCoordinator
-from .core import CatalogFilter, SmartAnalystError, search, suggest
+from .core import CatalogFilter, ReportProfile, SmartAnalystError, describe_schedule, search, suggest
 from .core.observations import Quality
 from .entity_catalog import build_catalog
 
@@ -80,7 +80,19 @@ def _overview_payload(coordinator: SmartAnalystCoordinator) -> dict[str, Any]:
         }
         for incident in coordinator.incidents.incidents
     ]
+    upcoming = coordinator.next_report_runs()
+    reports = []
+    for payload in coordinator.config_state.report_profiles:
+        item = dict(payload)
+        profile_id = str(item.get("id"))
+        item["next_run"] = upcoming.get(profile_id)
+        try:
+            item["schedule"] = describe_schedule(ReportProfile.from_dict(item))
+        except (ValueError, TypeError):
+            item["schedule"] = "вручную"
+        reports.append(item)
     return {
+        "version": VERSION,
         "overview": {
             "generated_at": snapshot.generated_at.isoformat() if snapshot else None,
             "rules_total": snapshot.rules_total if snapshot else 0,
@@ -119,7 +131,7 @@ def _overview_payload(coordinator: SmartAnalystCoordinator) -> dict[str, Any]:
             }
             for relationship in coordinator.model.relationships
         ],
-        "reports": [profile for profile in coordinator.config_state.report_profiles],
+        "reports": reports,
         "ai": {
             "enabled": bool(coordinator.config_state.settings.get("ai_enabled", True)),
             "model": coordinator.config_state.settings.get("ai_model"),

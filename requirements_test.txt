@@ -4,3 +4,4 @@ jsonschema>=4
 
 # Интеграционный контур (tests/ha)
 pytest-homeassistant-custom-component>=0.13
+tzdata>=2024.1

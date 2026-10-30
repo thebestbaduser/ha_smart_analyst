@@ -303,6 +303,12 @@ class HaSmartAnalystPanel extends HTMLElement {
     const name = root.querySelector("#profile-name").value.trim();
     const locale = root.querySelector("#profile-locale").value;
     const detail = root.querySelector("#profile-detail").value;
+    const timesRaw = root.querySelector("#profile-times").value.trim();
+    const scheduleTimes = timesRaw
+      ? timesRaw.split(",").map((item) => item.trim()).filter(Boolean)
+      : [];
+    const days = root.querySelector("#profile-days").value;
+    const weekdays = days === "weekdays" ? [0, 1, 2, 3, 4] : days === "weekends" ? [5, 6] : [];
     try {
       await this._call("profile/save", {
         profile: {
@@ -311,12 +317,27 @@ class HaSmartAnalystPanel extends HTMLElement {
           locale,
           detail,
           timezone: this.hass.config.time_zone,
-          report_type: "scheduled",
+          report_type: scheduleTimes.length ? "scheduled" : "on_demand",
+          schedule_times: scheduleTimes,
+          schedule_weekdays: weekdays,
         },
       });
       this._dialog = null;
       await this._load();
       this._ok(`Профиль «${name}» сохранён`);
+    } catch (err) {
+      this._fail(err);
+    }
+  }
+
+  async _deleteProfile(profileId) {
+    if (!window.confirm("Удалить профиль отчёта? Уже отправленные отчёты останутся.")) {
+      return;
+    }
+    try {
+      await this._call("profile/delete", { profile_id: profileId });
+      await this._load();
+      this._ok("Профиль удалён");
     } catch (err) {
       this._fail(err);
     }
@@ -492,7 +513,9 @@ class HaSmartAnalystPanel extends HTMLElement {
         pre { white-space: pre-wrap; font-family: inherit; background: var(--secondary-background-color); padding: 12px; border-radius: 8px; }
         @media (max-width: 600px) { :host { padding: 8px; } th, td { padding: 4px; } }
       </style>
-      <h1>HA Smart Analyst</h1>
+      <h1>HA Smart Analyst${
+        data && data.version ? ` <span class="muted">v${this._escape(data.version)}</span>` : ""
+      }</h1>
       <div class="tabs" role="tablist">${tabs}</div>
       ${flash}
       <div role="tabpanel">${body}</div>
@@ -524,7 +547,7 @@ class HaSmartAnalystPanel extends HTMLElement {
       return `<div class="card">
         <h2>Новый профиль отчёта</h2>
         <div class="row">
-          <label>Название<input id="profile-name" value="Вечерний отчёт"></label>
+          <label>Название<input id="profile-name" value="Отчёт"></label>
           <label>Язык<select id="profile-locale"><option value="ru">ru</option><option value="en">en</option></select></label>
           <label>Детализация<select id="profile-detail">
             <option value="adaptive">adaptive</option>
@@ -532,9 +555,18 @@ class HaSmartAnalystPanel extends HTMLElement {
             <option value="standard">standard</option>
             <option value="detailed">detailed</option>
           </select></label>
+        </div>
+        <div class="row">
+          <label>Время (HH:MM, через запятую)<input id="profile-times" placeholder="08:00, 20:00"></label>
+          <label>Дни<select id="profile-days">
+            <option value="every">каждый день</option>
+            <option value="weekdays">по будням</option>
+            <option value="weekends">по выходным</option>
+          </select></label>
           <button class="primary" data-action="submit-profile">Сохранить</button>
           <button data-action="close">Отмена</button>
         </div>
+        <p class="muted">Пустое время — отчёт только по кнопке. Время указывается в часовом поясе Home Assistant.</p>
       </div>`;
     }
     if (this._dialog === "report") {
@@ -757,18 +789,20 @@ class HaSmartAnalystPanel extends HTMLElement {
   _reports(data) {
     const add = `<div class="row"><button class="primary" data-action="new-profile">Новый профиль</button></div>`;
     if (!data.reports.length) {
-      return `${add}<p class="muted">Профилей нет. Профиль задаёт язык, детализацию и получателей отчёта.</p>`;
+      return `${add}<p class="muted">Профилей нет. Профиль задаёт время, язык и детализацию отчёта.</p>`;
     }
     return (
       add +
       this._table(
-        ["Профиль", "Детализация", "Язык", "Тип", ""],
+        ["Профиль", "Расписание", "Следующий запуск", "Детализация", "Язык", ""],
         data.reports.map((item) => [
           item.name,
+          item.schedule || "вручную",
+          item.next_run ? new Date(item.next_run).toLocaleString() : "—",
           item.detail,
           item.locale,
-          item.report_type,
-          `<button class="primary" data-action="generate-report" data-profile="${this._escape(item.id)}">Сформировать</button>`,
+          `<button class="primary" data-action="generate-report" data-profile="${this._escape(item.id)}">Сформировать</button>
+           <button class="danger" data-action="delete-profile" data-profile="${this._escape(item.id)}">Удалить</button>`,
         ])
       )
     );
@@ -871,6 +905,9 @@ class HaSmartAnalystPanel extends HTMLElement {
         break;
       case "generate-report":
         this._generateReport(dataset.profile);
+        break;
+      case "delete-profile":
+        this._deleteProfile(dataset.profile);
         break;
       case "ack":
         this._acknowledge(dataset.incident);

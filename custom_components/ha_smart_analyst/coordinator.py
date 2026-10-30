@@ -85,6 +85,7 @@ from .core import (
     export_configuration,
     load_config,
     new_identifier,
+    next_run_at,
     parse_payload,
     parse_rule,
     referenced_measurements,
@@ -148,6 +149,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         self._last_report_at: datetime | None = None
         self._tokens_used = 0
         self.last_delivery: dict[str, Any] | None = None
+        self._report_next: dict[str, datetime] = {}
 
     # -- жизненный цикл -----------------------------------------------
     async def async_initialize(self) -> None:
@@ -167,6 +169,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         self.queue.restore()
         self._parse_rules()
         self._restore_runtimes(now)
+        self._refresh_report_schedule(now)
         self._subscribe()
         await self._async_evaluate()
         await self._async_flush_queue()
@@ -189,6 +192,9 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                 self.hass, self._async_periodic, timedelta(seconds=ASSESS_INTERVAL_SECONDS)
             )
         )
+        self._unsubs.append(
+            async_track_time_interval(self.hass, self._async_report_tick, timedelta(minutes=1))
+        )
 
     async def async_shutdown(self) -> None:
         for unsubscribe in self._unsubs:
@@ -204,6 +210,54 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
 
     async def _async_periodic(self, now: datetime) -> None:
         await self._async_evaluate()
+
+    # -- расписание отчётов (REP-05) ----------------------------------
+    async def _async_report_tick(self, now: datetime) -> None:
+        await self.async_run_due_reports(now)
+
+    def _refresh_report_schedule(self, now: datetime | None = None) -> None:
+        """Пересчитать ближайшие запуски профилей."""
+        moment = now or dt_util.utcnow()
+        upcoming: dict[str, datetime] = {}
+        for payload in self.config_state.report_profiles:
+            try:
+                profile = ReportProfile.from_dict(payload)
+            except (ValueError, TypeError) as err:
+                _LOGGER.warning("Профиль отчёта пропущен: %s", err)
+                continue
+            when = next_run_at(profile, moment)
+            if when is not None:
+                upcoming[profile.id] = when
+        self._report_next = upcoming
+
+    def next_report_runs(self) -> dict[str, str]:
+        """Ближайшие запуски для панели: id профиля → ISO-время UTC."""
+        return {profile_id: when.isoformat() for profile_id, when in self._report_next.items()}
+
+    async def async_run_due_reports(self, now: datetime | None = None) -> list[str]:
+        """Сформировать отчёты, время которых наступило (REP-05).
+
+        Пропущенные из-за выключенного HA запуски не догоняются пачкой:
+        политика ``skip`` по умолчанию.
+        """
+        moment = now or dt_util.utcnow()
+        due = [
+            profile_id
+            for profile_id, when in self._report_next.items()
+            if when <= moment
+        ]
+        completed: list[str] = []
+        for profile_id in due:
+            try:
+                await self.async_generate_report(profile_id)
+            except Exception as err:  # noqa: BLE001 - один профиль не ломает остальные
+                _LOGGER.warning("Отчёт %s не сформирован: %s", profile_id, err)
+            else:
+                completed.append(profile_id)
+            self._report_next.pop(profile_id, None)
+        if due:
+            self._refresh_report_schedule(moment)
+        return completed
 
     # -- настройки ----------------------------------------------------
     def _apply_settings(self) -> None:
@@ -262,6 +316,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         self._apply_settings()
         self._parse_rules()
         self._restore_runtimes(dt_util.utcnow())
+        self._refresh_report_schedule()
         self._resubscribe()
         self._schedule_save()
         await self._async_evaluate()
@@ -412,6 +467,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                 break
         else:
             self.config_state.report_profiles.append(stored)
+        self._refresh_report_schedule()
         self._schedule_save()
         return profile
 
@@ -422,6 +478,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         ]
         if len(self.config_state.report_profiles) == before:
             raise SmartAnalystError(f"профиль {profile_id!r} не найден")
+        self._report_next.pop(profile_id, None)
         self._schedule_save()
 
     # -- оценка -------------------------------------------------------

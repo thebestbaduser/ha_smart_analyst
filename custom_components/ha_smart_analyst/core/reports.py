@@ -9,13 +9,17 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta, tzinfo
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
 from .ai import AIResponse, AnalysisPackage, SystemSection
 from .engine import Severity
 from .incidents import IncidentDigest
 from .observations import Quality
+
+#: Дни недели в порядке Python: 0 — понедельник, 6 — воскресенье.
+WEEKDAY_NAMES_RU = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 
 
 class DetailLevel(StrEnum):
@@ -49,19 +53,25 @@ class Locale(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ReportProfile:
-    """Профиль отчёта (REP-01)."""
+    """Профиль отчёта (REP-01).
+
+    ``schedule_times`` — локальные часы вида ``"08:00"``; пусто — отчёт только
+    вручную. ``schedule_weekdays`` — дни Python (0 = Пн); пусто — каждый день.
+    """
 
     id: str
     name: str
     detail: DetailLevel = DetailLevel.ADAPTIVE
     locale: Locale = Locale.RU
     timezone: str = "UTC"
-    report_type: ReportType = ReportType.SCHEDULED
+    report_type: ReportType = ReportType.ON_DEMAND
     enabled: bool = True
     system_ids: tuple[str, ...] = ()
     history_seconds: int = 1_800
     include_warnings: bool = True
     recipients: tuple[str, ...] = ()
+    schedule_times: tuple[str, ...] = ()
+    schedule_weekdays: tuple[int, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -76,23 +86,110 @@ class ReportProfile:
             "history_seconds": self.history_seconds,
             "include_warnings": self.include_warnings,
             "recipients": list(self.recipients),
+            "schedule_times": list(self.schedule_times),
+            "schedule_weekdays": list(self.schedule_weekdays),
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> ReportProfile:
+        schedule_times = tuple(
+            slot.strftime("%H:%M") for slot in parse_schedule_times(payload.get("schedule_times", ()))
+        )
+        weekdays = tuple(sorted({int(item) for item in payload.get("schedule_weekdays", ())}))  # type: ignore[union-attr]
+        if any(day < 0 or day > 6 for day in weekdays):
+            raise ValueError("дни недели задаются числами 0…6 (0 — понедельник)")
+        raw_type = payload.get("report_type")
+        if raw_type:
+            report_type = ReportType(raw_type)
+            if report_type is ReportType.SCHEDULED and not schedule_times:
+                report_type = ReportType.ON_DEMAND
+        else:
+            report_type = ReportType.SCHEDULED if schedule_times else ReportType.ON_DEMAND
         return cls(
             id=str(payload.get("id") or uuid.uuid4()),
             name=str(payload.get("name") or "Отчёт"),
             detail=DetailLevel(payload.get("detail", "adaptive")),
             locale=Locale(payload.get("locale", "ru")),
             timezone=str(payload.get("timezone", "UTC")),
-            report_type=ReportType(payload.get("report_type", "scheduled")),
+            report_type=report_type,
             enabled=bool(payload.get("enabled", True)),
             system_ids=tuple(payload.get("system_ids", ())),  # type: ignore[arg-type]
             history_seconds=int(payload.get("history_seconds", 1_800)),
             include_warnings=bool(payload.get("include_warnings", True)),
             recipients=tuple(payload.get("recipients", ())),  # type: ignore[arg-type]
+            schedule_times=schedule_times,
+            schedule_weekdays=weekdays,
         )
+
+
+def parse_schedule_times(values: object) -> tuple[time, ...]:
+    """Разобрать список ``"HH:MM"``; неверный формат — понятная ошибка."""
+    if values in (None, "", ()):
+        return ()
+    if isinstance(values, str):
+        candidates: Sequence[object] = [item for item in values.split(",")]
+    elif isinstance(values, (list, tuple)):
+        candidates = values
+    else:
+        raise ValueError("время отчёта задаётся строкой или списком строк HH:MM")
+    parsed: list[time] = []
+    for raw in candidates:
+        text = str(raw).strip()
+        if not text:
+            continue
+        try:
+            hour_text, minute_text = text.split(":", 1)
+            parsed.append(time(int(hour_text), int(minute_text)))
+        except (ValueError, TypeError) as err:
+            raise ValueError(f"неверное время {text!r}; ожидается HH:MM") from err
+    return tuple(sorted(set(parsed)))
+
+
+def profile_zone(profile: ReportProfile) -> tzinfo:
+    """Часовой пояс профиля; неизвестный пояс не ломает планировщик."""
+    try:
+        return ZoneInfo(profile.timezone or "UTC")
+    except Exception:  # noqa: BLE001 - нет tzdata или неизвестная зона
+        return UTC
+
+
+def next_run_at(profile: ReportProfile, now: datetime) -> datetime | None:
+    """Ближайший запуск профиля в UTC или ``None`` для ручного отчёта."""
+    slots = parse_schedule_times(profile.schedule_times)
+    if not profile.enabled or not slots:
+        return None
+    zone = profile_zone(profile)
+    moment = now if now.tzinfo else now.replace(tzinfo=UTC)
+    local_now = moment.astimezone(zone)
+    weekdays = set(profile.schedule_weekdays)
+    for offset in range(0, 8):
+        day = (local_now + timedelta(days=offset)).date()
+        if weekdays and day.weekday() not in weekdays:
+            continue
+        for slot in slots:
+            candidate = datetime.combine(day, slot, tzinfo=zone)
+            if candidate > local_now:
+                return candidate.astimezone(UTC)
+    return None
+
+
+def describe_schedule(profile: ReportProfile) -> str:
+    """Короткое описание расписания для ответов API и панели."""
+    slots = parse_schedule_times(profile.schedule_times)
+    if not slots:
+        return "вручную"
+    times = ", ".join(slot.strftime("%H:%M") for slot in slots)
+    weekdays = set(profile.schedule_weekdays)
+    if not weekdays:
+        days = "ежедневно"
+    elif weekdays == set(range(5)):
+        days = "по будням"
+    elif weekdays == {5, 6}:
+        days = "по выходным"
+    else:
+        days = ", ".join(WEEKDAY_NAMES_RU[day] for day in sorted(weekdays))
+    suffix = "" if profile.enabled else " (выключен)"
+    return f"{days}, {times}{suffix}"
 
 
 class ReportState(StrEnum):
