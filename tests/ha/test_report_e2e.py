@@ -222,6 +222,8 @@ async def test_report_flow_reaches_mock_telegram(
     assert response["used_ai"] is False
     assert "57,8" in response["text"]
     assert "60,0" in response["text"]
+    assert "ИИ отключён" in response["text"]
+    assert "не ответил" not in response["text"]
     assert set(response) >= {"text", "detail", "used_ai", "attention"}
     node = shutil.which("node")
     if node is not None:
@@ -260,3 +262,24 @@ async def test_report_flow_reaches_mock_telegram(
     assert len(messages) == 2
 
     await client.close()
+
+async def test_partial_history_error_is_explicit_in_report(
+    hass, entry, monkeypatch
+) -> None:
+    hass.states.async_set("sensor.temp", "57.8", {"unit_of_measurement": "°C"})
+    coordinator = await _setup(hass, entry)
+    system = await coordinator.async_create_system("Отопление", "heating")
+    await coordinator.async_add_measurement(
+        system_id=system.id, entity_id="sensor.temp", role="actual", unit="°C"
+    )
+
+    async def partial_load(cls, hass, window, sources, timeout_seconds=None):
+        return CachedHistory({}, errors=("sensor.temp: database is locked",))
+
+    monkeypatch.setattr(CachedHistory, "async_load", classmethod(partial_load))
+
+    rendered = await coordinator.async_generate_report(use_ai=False)
+
+    assert "57,8" in rendered.text
+    assert "часть истории не прочитана (1)" in rendered.text
+    assert "ИИ отключён" in rendered.text

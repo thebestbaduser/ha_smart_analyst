@@ -1044,6 +1044,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
             local_severity=local_severity,
             ai_error=ai_error,
             history_note=history_note,
+            ai_requested=use_ai,
         )
         recipients = list(profile.recipients or self.notification_targets())
         for recipient in recipients:
@@ -1165,6 +1166,20 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                 )
             except Exception as err:  # noqa: BLE001 - без истории отчёт остаётся честным
                 _LOGGER.debug("История для отчёта недоступна: %s", err)
+            if history is not None and history.errors:
+                _LOGGER.warning(
+                    "История для отчёта прочитана частично: %s",
+                    "; ".join(history.errors[:3]),
+                )
+                if history_note is None:
+                    count = len(history.errors)
+                    history_note = (
+                        f"часть истории не прочитана ({count}) — проверьте журнал; "
+                        "отчёт по доступным данным"
+                        if profile.locale is Locale.RU
+                        else f"part of the history was not read ({count}) — check the log; "
+                        "the report uses available data"
+                    )
 
         required = set(profile.required_measurement_ids)
         present: set[str] = set()

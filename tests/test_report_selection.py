@@ -20,9 +20,11 @@ from core.model import (
 from core.observations import Quality, ValueType, build_observation
 from core.reports import (
     DetailLevel,
+    Locale,
     ReportProfile,
     compact_groups,
     compact_measurements,
+    format_number,
     history_facts,
     render_report,
     system_coverage,
@@ -283,3 +285,31 @@ def test_compact_groups_pair_equipment_and_can_be_disabled() -> None:
     assert grouped[0][0] == "🔥"
     assert len(grouped[0][1]) == 2
     assert len(single) == 2
+
+def test_currency_keeps_two_digits() -> None:
+    assert format_number(620.74, "₽") == "620,74 ₽"
+    assert format_number(57.8, "°C") == "57,8 °C"
+    assert format_number(620.74, "₽", Locale.EN) == "620.74 ₽"
+
+
+def test_explicit_ai_disabled_is_not_an_error() -> None:
+    profile = ReportProfile(id="p", name="Отчёт", detail=DetailLevel.COMPACT)
+    package = build_package(
+        site_id="site",
+        now=NOW,
+        window_start=NOW - timedelta(minutes=30),
+        window_end=NOW,
+        systems=[
+            SystemSection(
+                id="s",
+                name="Дом",
+                measurements=(fact("m", required=True),),
+            )
+        ],
+    )
+
+    rendered = render_report(profile, package, NOW, ai_requested=False)
+
+    assert "ИИ отключён" in rendered.text
+    assert "не ответил" not in rendered.text
+    assert "не прошёл проверку" not in rendered.text

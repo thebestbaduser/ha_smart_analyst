@@ -70,9 +70,10 @@ def test_attribute_changes_give_delta(hass: HomeAssistant, monkeypatch) -> None:
     sources = {"m": HistorySource("climate.boiler", "current_temperature")}
     window = Window.last(now, 1_800)
 
-    raw = _read_states(hass, window, sources)
+    raw, errors = _read_states(hass, window, sources)
     samples = raw["m"]
 
+    assert errors == []
     assert calls == ["climate.boiler"]
     assert [sample.value for sample in samples] == [55.0, 58.0]
     assert summarize(samples, window).delta == pytest.approx(3.0)
@@ -94,13 +95,14 @@ def test_attribute_history_without_values_is_empty(hass: HomeAssistant, monkeypa
             ]
         },
     )
-    raw = _read_states(
+    raw, errors = _read_states(
         hass,
         Window.last(now, 1_800),
         {"m": HistorySource("climate.boiler", "current_temperature")},
     )
 
     assert raw["m"] == []
+    assert errors == []
 
 
 def test_provider_sends_bearer_token_and_hides_key() -> None:
@@ -284,3 +286,27 @@ async def test_fast_rule_survives_history_timeout(
         incident.rule_id == "rule_fast_timeout"
         for incident in coordinator.incidents.active()
     )
+
+def test_history_read_error_is_visible_for_entity(hass: HomeAssistant, monkeypatch) -> None:
+    now = dt_util.utcnow()
+
+    def fake(hass, start, end, entity_id=None, **kwargs):
+        if entity_id == "sensor.bad":
+            raise RuntimeError("database is locked")
+        return {entity_id: [SimpleNamespace(state="20", attributes={}, last_updated=now)]}
+
+    monkeypatch.setattr(history_module, "state_changes_during_period", fake)
+    raw, errors = _read_states(
+        hass,
+        Window.last(now, 600),
+        {
+            "good": HistorySource("sensor.good"),
+            "bad": HistorySource("sensor.bad"),
+        },
+    )
+
+    assert raw["good"]
+    assert raw["bad"] == []
+    assert len(errors) == 1
+    assert "sensor.bad" in errors[0]
+    assert "database is locked" in errors[0]

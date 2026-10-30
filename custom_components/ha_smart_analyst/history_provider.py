@@ -72,11 +72,12 @@ def state_sample(state: object, attribute: str | None = None) -> Sample | None:
 
 def _read_states(
     hass: HomeAssistant, window: Window, sources: Mapping[str, HistorySource]
-) -> dict[str, list[Sample]]:
+) -> tuple[dict[str, list[Sample]], list[str]]:
     result: dict[str, list[Sample]] = {measurement_id: [] for measurement_id in sources}
+    errors: list[str] = []
     entity_ids = sorted({source.entity_id for source in sources.values() if source.entity_id})
     if not entity_ids:
-        return result
+        return result, errors
     raw_states: dict[str, list[object]] = {}
     for entity_id in entity_ids:
         try:
@@ -89,7 +90,8 @@ def _read_states(
                 include_start_time_state=True,
             )
         except Exception as err:  # noqa: BLE001 - Recorder может быть выключен
-            _LOGGER.debug("История %s недоступна: %s", entity_id, err)
+            _LOGGER.warning("История %s недоступна: %s", entity_id, err)
+            errors.append(f"{entity_id}: {err}")
             raw_states[entity_id] = []
             continue
         raw_states[entity_id] = list(states.get(entity_id, ()))
@@ -99,14 +101,19 @@ def _read_states(
             for state in raw_states.get(source.entity_id, ())
         ]
         result[measurement_id] = [sample for sample in samples if sample is not None]
-    return result
+    return result, errors
 
 
 class CachedHistory:
     """Снимок истории для одного цикла оценки (реализует ``HistoryProvider``)."""
 
-    def __init__(self, by_measurement: Mapping[str, Sequence[Sample]]) -> None:
+    def __init__(
+        self,
+        by_measurement: Mapping[str, Sequence[Sample]],
+        errors: Sequence[str] = (),
+    ) -> None:
         self._by_measurement = {key: list(value) for key, value in by_measurement.items()}
+        self.errors = tuple(errors)
 
     def samples(self, measurement_id: str, window: Window) -> Sequence[Sample]:
         return self._by_measurement.get(measurement_id, ())
@@ -124,18 +131,20 @@ class CachedHistory:
         ``timeout_seconds`` ограничивает и ожидание Recorder, и чтение: отчёт
         не должен зависать из-за базы. По таймауту поднимается ``TimeoutError``,
         вызывающая сторона решает, показывать отчёт без истории или нет.
+        Отмена не прерывает уже запущенный поток executor; таймаут освобождает
+        отчёт, но фоновая работа завершится сама.
         """
         if not sources:
             return cls({})
 
-        async def read() -> dict[str, list[Sample]]:
+        async def read() -> tuple[dict[str, list[Sample]], list[str]]:
             recorder = get_instance(hass)
             await recorder.async_wait_recorder()
             return await hass.async_add_executor_job(_read_states, hass, window, sources)
 
         if timeout_seconds is None:
-            raw = await read()
+            raw, errors = await read()
         else:
             async with asyncio.timeout(timeout_seconds):
-                raw = await read()
-        return cls(raw)
+                raw, errors = await read()
+        return cls(raw, errors)

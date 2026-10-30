@@ -264,7 +264,7 @@ def reference_profile(detail: DetailLevel) -> ReportProfile:
 def render_reference(detail: DetailLevel, *, history: dict[str, list[Sample]] | None = None):
     model = build_reference_model()
     package, _ = build_reference_package(model, history=history)
-    return render_report(reference_profile(detail), package, NOW)
+    return render_report(reference_profile(detail), package, NOW, ai_requested=False)
 
 
 def _boiler_history() -> dict[str, list[Sample]]:
@@ -346,6 +346,9 @@ def test_reference_compact_groups_related_readings() -> None:
     assert "💧 Бойлер ГВС 42,6 / 45,0 °C" in text
     assert "⚡ Фаза L1 240,0 · Фаза L2 232,6 · Фаза L3 227,2 В" in text
     assert "🌡️ Первый этаж 24,3 · Второй этаж 23,5 · Улица 0,6 °C" in text
+    assert "620,74 ₽" in text
+    assert "ИИ отключён" in text
+    assert "не ответил" not in text
 
 
 def test_reference_fixture_matches_current_reports() -> None:

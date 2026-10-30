@@ -261,9 +261,21 @@ def phase_spread(values: Sequence[float], unit: str = "V") -> PhaseSpread:
     return PhaseSpread(minimum, maximum, maximum - minimum, (maximum - minimum) / mean * 100.0, unit)
 
 
-def format_number(value: float, unit: str | None = None, locale: Locale = Locale.RU, digits: int = 1) -> str:
-    """Число с локальным разделителем и единицей."""
-    text = f"{value:.{digits}f}"
+_CURRENCY_UNITS = frozenset({"₽", "руб", "руб.", "rub", "rur", "$", "usd", "€", "eur"})
+
+
+def number_digits(unit: str | None) -> int:
+    """Точность по единице: деньги — два знака, остальное — один."""
+    return 2 if unit and unit.strip().lower() in _CURRENCY_UNITS else 1
+
+
+def format_number(value: float, unit: str | None = None, locale: Locale = Locale.RU, digits: int | None = None) -> str:
+    """Число с локальным разделителем и единицей.
+
+    По умолчанию точность зависит от единицы: деньги — два знака, остальное — один.
+    """
+    places = number_digits(unit) if digits is None else digits
+    text = f"{value:.{places}f}"
     if locale is Locale.RU:
         text = text.replace(".", ",")
     return f"{text} {unit}" if unit else text
@@ -745,6 +757,21 @@ def _fallback_lines(
     ]
 
 
+def _ai_disabled_lines(locale: Locale) -> list[str]:
+    """ИИ не вызывали специально — это не ошибка провайдера."""
+    if locale is Locale.RU:
+        return [
+            "",
+            "**ИИ отключён для этого отчёта**",
+            "Отчёт сформирован по локальным показаниям; сеть и DeepSeek не использовались.",
+        ]
+    return [
+        "",
+        "**AI disabled for this report**",
+        "The report uses local readings only; no network or DeepSeek call was made.",
+    ]
+
+
 def _compact_quality(fact: MeasurementFact, locale: Locale) -> str:
     if fact.quality is Quality.OK:
         return ""
@@ -851,6 +878,7 @@ def render_report(
     detail: DetailLevel | None = None,
     ai_error: str | None = None,
     history_note: str | None = None,
+    ai_requested: bool = True,
 ) -> RenderedReport:
     """Собрать текст отчёта: факты локально, ИИ — отдельным блоком."""
     data_quality_issue = any(
@@ -885,6 +913,8 @@ def render_report(
 
         attention = apply_attention_floor(local_severity, response)
         lines.extend(_ai_lines(response, locale, attention))
+    elif not ai_requested:
+        lines.extend(_ai_disabled_lines(locale))
     else:
         lines.extend(_fallback_lines(package, locale, ai_error))
 
