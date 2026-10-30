@@ -1,12 +1,12 @@
 """Провайдер DeepSeek: сетевые вызовы, таймауты и классификация ошибок (AI-01, NFR-03, NFR-04).
 
-Токен и endpoint приходят из Config Entry; в текстовых экспортах секрета нет.
+Токен и endpoint приходят из Config Entry; в текстовых экспортах и repr секрета нет.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import aiohttp
@@ -18,22 +18,30 @@ _LOGGER = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 45
 CONNECT_TIMEOUT = 10
+MAX_REQUEST_BYTES = 200_000
 
 
 class ProviderError(Exception):
-    """Ошибка провайдера с решением о повторе."""
+    """Ошибка провайдера с решением о повторе и видом сбоя."""
 
-    def __init__(self, message: str, status: int | None = None, action: RetryAction = RetryAction.FALLBACK) -> None:
+    def __init__(
+        self,
+        message: str,
+        status: int | None = None,
+        action: RetryAction = RetryAction.FALLBACK,
+        kind: str = "http",
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.action = action
+        self.kind = kind
 
 
 @dataclass(frozen=True, slots=True)
 class ProviderConfig:
-    """Настройки провайдера без записи в репозиторий."""
+    """Настройки провайдера; ключ не попадает в repr и журналы."""
 
-    api_key: str
+    api_key: str = field(repr=False)
     base_url: str = DEFAULT_AI_BASE_URL
     model: str = DEFAULT_AI_MODEL
 
@@ -75,16 +83,28 @@ class DeepSeekProvider:
                         response.status,
                         classify_status(response.status),
                     )
+        except TimeoutError as err:
+            raise ProviderError(
+                "таймаут подключения", action=RetryAction.RETRY, kind="timeout"
+            ) from err
         except aiohttp.ClientError as err:
-            raise ProviderError(f"сеть недоступна: {err}") from err
+            raise ProviderError(
+                f"сеть недоступна: {err}", action=RetryAction.RETRY, kind="network"
+            ) from err
 
     async def async_analyze(self, package: AnalysisPackage) -> str:
         """Отправить пакет и вернуть сырой текст ответа (валидация — в ядре)."""
+        body_json = package.to_json()
+        if len(body_json.encode("utf-8")) > MAX_REQUEST_BYTES:
+            raise ProviderError(
+                f"пакет больше {MAX_REQUEST_BYTES} байт — сократите профиль отчёта",
+                kind="request_too_large",
+            )
         payload: dict[str, Any] = {
             "model": self._config.model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": package.to_json()},
+                {"role": "user", "content": body_json},
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0.2,
@@ -104,20 +124,24 @@ class DeepSeekProvider:
                         classify_status(response.status),
                     )
         except TimeoutError as err:
-            raise ProviderError("таймаут ответа модели", action=RetryAction.RETRY) from err
+            raise ProviderError(
+                "таймаут ответа модели", action=RetryAction.RETRY, kind="timeout"
+            ) from err
         except aiohttp.ClientError as err:
-            raise ProviderError(f"сеть недоступна: {err}", action=RetryAction.RETRY) from err
+            raise ProviderError(
+                f"сеть недоступна: {err}", action=RetryAction.RETRY, kind="network"
+            ) from err
         try:
             data = await _json(body)
         except ValueError as err:
-            raise ProviderError(f"провайдер вернул не JSON: {err}") from err
+            raise ProviderError(f"провайдер вернул не JSON: {err}", kind="json") from err
         choices = data.get("choices") or []
         if not choices:
-            raise ProviderError("провайдер вернул пустой ответ")
+            raise ProviderError("провайдер вернул пустой ответ", kind="empty")
         message = choices[0].get("message") or {}
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
-            raise ProviderError("провайдер вернул пустое содержимое")
+            raise ProviderError("провайдер вернул пустое содержимое", kind="empty")
         return content
 
 

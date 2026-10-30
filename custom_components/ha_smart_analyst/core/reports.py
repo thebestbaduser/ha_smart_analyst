@@ -15,10 +15,11 @@ from zoneinfo import ZoneInfo
 
 from .ai import AIResponse, AnalysisPackage, Fact, MeasurementFact, SystemSection
 from .engine import Severity
-from .history import Sample, Window, summarize
+from .history import Sample, Window, counter_total, summarize
 from .incidents import IncidentDigest
-from .model import MeasurementRole
-from .observations import Quality
+from .model import Measurement, MeasurementRole
+from .observations import Observation, Quality
+from .units import compatible, convert
 
 #: Дни недели в порядке Python: 0 — понедельник, 6 — воскресенье.
 WEEKDAY_NAMES_RU = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
@@ -74,6 +75,12 @@ class ReportProfile:
     recipients: tuple[str, ...] = ()
     schedule_times: tuple[str, ...] = ()
     schedule_weekdays: tuple[int, ...] = ()
+    required_measurement_ids: tuple[str, ...] = ()
+    optional_measurement_ids: tuple[str, ...] = ()
+    measurement_order: tuple[str, ...] = ()
+    max_optional: int = 8
+    group_by_system: bool = True
+    show_states: bool = True
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -90,6 +97,12 @@ class ReportProfile:
             "recipients": list(self.recipients),
             "schedule_times": list(self.schedule_times),
             "schedule_weekdays": list(self.schedule_weekdays),
+            "required_measurement_ids": list(self.required_measurement_ids),
+            "optional_measurement_ids": list(self.optional_measurement_ids),
+            "measurement_order": list(self.measurement_order),
+            "max_optional": self.max_optional,
+            "group_by_system": self.group_by_system,
+            "show_states": self.show_states,
         }
 
     @classmethod
@@ -121,6 +134,18 @@ class ReportProfile:
             recipients=tuple(payload.get("recipients", ())),  # type: ignore[arg-type]
             schedule_times=schedule_times,
             schedule_weekdays=weekdays,
+            required_measurement_ids=tuple(
+                str(item) for item in payload.get("required_measurement_ids", ())  # type: ignore[union-attr]
+            ),
+            optional_measurement_ids=tuple(
+                str(item) for item in payload.get("optional_measurement_ids", ())  # type: ignore[union-attr]
+            ),
+            measurement_order=tuple(
+                str(item) for item in payload.get("measurement_order", ())  # type: ignore[union-attr]
+            ),
+            max_optional=int(payload.get("max_optional", 8)),
+            group_by_system=bool(payload.get("group_by_system", True)),
+            show_states=bool(payload.get("show_states", True)),
         )
 
 
@@ -263,24 +288,127 @@ _ROLE_PRIORITY = {
 }
 
 
-def compact_measurements(
-    systems: Sequence[SystemSection], limit: int = 8
-) -> list[tuple[str, MeasurementFact]]:
-    """Ключевые числовые показатели для короткого отчёта.
+def compact_omitted(systems: Sequence[SystemSection], profile: ReportProfile) -> int:
+    """Сколько показаний не поместилось в компактный отчёт (признак неполноты)."""
+    visible = {
+        measurement.id
+        for system in systems
+        for measurement in system.measurements
+        if measurement.required or measurement_is_visible(profile, measurement)
+    }
+    return max(0, len(visible) - len(compact_measurements(systems, profile)))
 
-    Компактный отчёт показывает главное, а не молчит: даже при нормальном
-    состоянии дома пользователь видит температуры, мощность и уставки.
+
+def measurement_is_visible(profile: ReportProfile, measurement: MeasurementFact) -> bool:
+    """Показывать ли необязательное показание: числа всегда, состояния — по настройке."""
+    if isinstance(measurement.value, (int, float)) and not isinstance(measurement.value, bool):
+        return True
+    return profile.show_states and measurement.value is not None
+
+
+def measurement_rank(
+    profile: ReportProfile, measurement: MeasurementFact
+) -> tuple[int, int, int]:
+    """Порядок вывода: явный список, затем обязательные, дополнительные, остальные."""
+    try:
+        explicit = profile.measurement_order.index(measurement.id)
+    except ValueError:
+        explicit = len(profile.measurement_order)
+    if measurement.required or measurement.id in profile.required_measurement_ids:
+        group = 0
+    elif measurement.id in profile.optional_measurement_ids:
+        group = 1
+    else:
+        group = 2
+    return (explicit, group, _ROLE_PRIORITY.get(measurement.role, 99))
+
+
+def compact_measurements(
+    systems: Sequence[SystemSection], profile: ReportProfile
+) -> list[tuple[str, MeasurementFact]]:
+    """Ключевые показатели для короткого отчёта.
+
+    Обязательные показатели профиля не отсекаются никогда; лимит действует
+    только на дополнительные и автоматически подобранные значения.
     """
-    items: list[tuple[int, str, MeasurementFact]] = []
+    required: list[tuple[tuple[int, int, int], str, MeasurementFact]] = []
+    optional: list[tuple[tuple[int, int, int], str, MeasurementFact]] = []
+    seen: set[str] = set()
     for system in systems:
         for measurement in system.measurements:
-            value = measurement.value
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                items.append(
-                    (_ROLE_PRIORITY.get(measurement.role, 99), system.name, measurement)
-                )
-    items.sort(key=lambda item: item[0])
-    return [(system_name, measurement) for _, system_name, measurement in items[:limit]]
+            if measurement.id in seen:
+                continue
+            rank = measurement_rank(profile, measurement)
+            if measurement.required:
+                required.append((rank, system.name, measurement))
+                seen.add(measurement.id)
+                continue
+            if not measurement_is_visible(profile, measurement):
+                continue
+            optional.append((rank, system.name, measurement))
+    required.sort(key=lambda item: item[0])
+    optional.sort(key=lambda item: item[0])
+    limit = max(0, profile.max_optional)
+    selected = required + optional[:limit]
+    return [(system_name, measurement) for _, system_name, measurement in selected]
+
+
+def system_coverage(coverages: Sequence[float]) -> float | None:
+    """Покрытие системы — среднее по датчикам, а не лучший датчик.
+
+    Максимум одного источника нельзя выдавать за качество истории всей системы.
+    Пустой список означает «покрытие неизвестно», а не ноль.
+    """
+    values = [value for value in coverages if value is not None]
+    return sum(values) / len(values) if values else None
+
+
+def pair_facts(
+    measurements: Sequence[Measurement], observations: dict[str, Observation]
+) -> tuple[Fact, ...]:
+    """Отклонение «факт − уставка» только внутри одного оборудования (SEM-04).
+
+    Если оборудование не задано и пара неоднозначна, факт не выдумывается.
+    """
+    groups: dict[str | None, list[Measurement]] = {}
+    for measurement in measurements:
+        groups.setdefault(measurement.equipment_id, []).append(measurement)
+    facts: list[Fact] = []
+    for equipment_id, group in groups.items():
+        actuals = [item for item in group if item.role is MeasurementRole.ACTUAL]
+        setpoints = [item for item in group if item.role is MeasurementRole.SETPOINT]
+        if equipment_id is None and (len(actuals) != 1 or len(setpoints) != 1):
+            continue
+        if not actuals or not setpoints:
+            continue
+        actual, setpoint = actuals[0], setpoints[0]
+        actual_observation = observations.get(actual.id)
+        setpoint_observation = observations.get(setpoint.id)
+        if (
+            actual_observation is None
+            or setpoint_observation is None
+            or actual_observation.numeric_value is None
+            or setpoint_observation.numeric_value is None
+        ):
+            continue
+        actual_unit = actual_observation.unit or actual.unit
+        setpoint_unit = setpoint_observation.unit or setpoint.unit
+        setpoint_value = setpoint_observation.numeric_value
+        if setpoint_unit and actual_unit and setpoint_unit != actual_unit:
+            if not compatible(setpoint_unit, actual_unit):
+                continue
+            setpoint_value = convert(setpoint_value, setpoint_unit, actual_unit)
+        facts.append(
+            Fact(
+                id=f"fact_gap_{actual.id}",
+                kind="difference",
+                value=round(actual_observation.numeric_value - setpoint_value, 3),
+                unit=actual_unit,
+                label=f"{actual.name} − {setpoint.name}",
+                source=actual.id,
+            )
+        )
+    return tuple(facts)
 
 
 def history_facts(
@@ -289,35 +417,59 @@ def history_facts(
     samples: Sequence[Sample],
     window: Window,
     unit: str | None = None,
+    *,
+    counter: bool = False,
 ) -> tuple[Fact, ...]:
-    """Локально рассчитанные факты истории с идентификаторами для ссылок ИИ."""
+    """Локально рассчитанные факты истории с идентификаторами для ссылок ИИ.
+
+    ``counter=True`` — накопительный счётчик: изменение считается с учётом
+    сбросов, а не как разность крайних значений.
+    """
     aggregate = summarize(samples, window)
-    if not aggregate.usable:
-        return ()
     prefix = f"fact_{measurement_id}"
     facts: list[Fact] = []
-    if aggregate.delta is not None:
+
+    def add(suffix: str, kind: str, value: float | int, unit_: str | None, label: str) -> None:
         facts.append(
             Fact(
-                f"{prefix}_delta",
-                "delta",
-                round(aggregate.delta, 3),
-                unit,
-                f"{name}: изменение за период",
+                f"{prefix}_{suffix}",
+                kind,
+                value,
+                unit_,
+                f"{name}: {label}",
+                source=measurement_id,
             )
         )
+
+    if not aggregate.usable:
+        add(
+            "coverage",
+            "coverage",
+            round(aggregate.coverage * 100, 1),
+            "%",
+            "покрытие истории (недостаточно данных)",
+        )
+        return tuple(facts)
+    if counter:
+        total, resets = counter_total(samples, unit)
+        if total is not None:
+            add("total", "counter_total", round(total, 3), unit, "прирост за период")
+        if resets:
+            add("resets", "counter_resets", resets, None, "сбросов счётчика")
+    elif aggregate.delta is not None:
+        add("delta", "delta", round(aggregate.delta, 3), unit, "изменение за период")
+    if aggregate.first is not None:
+        add("start", "start", round(aggregate.first, 3), unit, "в начале")
+    if aggregate.last is not None:
+        add("end", "end", round(aggregate.last, 3), unit, "в конце")
     if aggregate.mean is not None:
-        facts.append(
-            Fact(f"{prefix}_mean", "mean", round(aggregate.mean, 3), unit, f"{name}: среднее")
-        )
+        add("mean", "mean", round(aggregate.mean, 3), unit, "среднее")
     if aggregate.minimum is not None:
-        facts.append(
-            Fact(f"{prefix}_min", "min", round(aggregate.minimum, 3), unit, f"{name}: минимум")
-        )
+        add("min", "min", round(aggregate.minimum, 3), unit, "минимум")
     if aggregate.maximum is not None:
-        facts.append(
-            Fact(f"{prefix}_max", "max", round(aggregate.maximum, 3), unit, f"{name}: максимум")
-        )
+        add("max", "max", round(aggregate.maximum, 3), unit, "максимум")
+    add("count", "count", aggregate.count, None, "пригодных измерений")
+    add("coverage", "coverage", round(aggregate.coverage * 100, 1), "%", "покрытие истории")
     return tuple(facts)
 
 
@@ -435,28 +587,33 @@ def _header(profile: ReportProfile, package: AnalysisPackage, now: datetime) -> 
     ]
 
 
+def _format_value(value: object, unit: str | None, locale: Locale) -> str:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return format_number(float(value), unit, locale)
+    if isinstance(value, bool):
+        if locale is Locale.RU:
+            return "включено" if value else "выключено"
+        return "on" if value else "off"
+    return "—" if value is None else str(value)
+
+
 def _system_lines(system: SystemSection, locale: Locale, detailed: bool) -> list[str]:
     lines = [f"• {system.name}"]
     for measurement in system.measurements:
         quality = (_QUALITY_RU if locale is Locale.RU else _QUALITY_EN)[measurement.quality]
-        value = measurement.value
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            rendered = format_number(float(value), measurement.unit, locale)
-        else:
-            rendered = "—" if value is None else str(value)
+        rendered = _format_value(measurement.value, measurement.unit, locale)
         suffix = "" if measurement.quality is Quality.OK else f" [{quality}]"
         lines.append(f"  – {measurement.name}: {rendered}{suffix}")
     if detailed:
         for fact in system.facts:
-            if isinstance(fact.value, (int, float)) and not isinstance(fact.value, bool):
-                rendered = format_number(float(fact.value), fact.unit, locale)
-            else:
-                rendered = str(fact.value)
+            rendered = _format_value(fact.value, fact.unit, locale)
             lines.append(f"  · {fact.label or fact.id}: {rendered}")
-        coverage = system.coverage or 0.0
         trend = system.trend or ("нет данных" if locale is Locale.RU else "no data")
         label = "покрытие истории" if locale is Locale.RU else "history coverage"
-        lines.append(f"  · {label}: {coverage:.0%}; {trend}")
+        if system.coverage is None:
+            lines.append(f"  · {label}: — ({trend})")
+        else:
+            lines.append(f"  · {label}: {system.coverage:.0%}; {trend}")
     return lines
 
 
@@ -508,9 +665,10 @@ def _fallback_lines(
     ]
 
 
-def _compact_lines(package: AnalysisPackage, locale: Locale) -> list[str]:
+def _compact_lines(package: AnalysisPackage, profile: ReportProfile) -> list[str]:
     """Короткая сводка с ключевыми цифрами — показывается всегда (REP-04)."""
-    selected = compact_measurements(package.systems)
+    locale = profile.locale
+    selected = compact_measurements(package.systems, profile)
     if locale is Locale.RU:
         lines = ["", "**Ключевые показатели**"]
         if not selected:
@@ -524,7 +682,13 @@ def _compact_lines(package: AnalysisPackage, locale: Locale) -> list[str]:
             )
             lines.append(
                 f"• {system_name}: {measurement.name} — "
-                f"{format_number(float(measurement.value), measurement.unit, locale)}{quality}"
+                f"{_format_value(measurement.value, measurement.unit, locale)}{quality}"
+            )
+        omitted = compact_omitted(package.systems, profile)
+        if omitted:
+            lines.append(
+                f"• Не показано из-за лимита: {omitted}. "
+                "Увеличьте «Лимит дополнительных» в профиле."
             )
         return lines
     lines = ["", "**Key readings**"]
@@ -537,7 +701,12 @@ def _compact_lines(package: AnalysisPackage, locale: Locale) -> list[str]:
         )
         lines.append(
             f"• {system_name}: {measurement.name} — "
-            f"{format_number(float(measurement.value), measurement.unit, locale)}{quality}"
+            f"{_format_value(measurement.value, measurement.unit, locale)}{quality}"
+        )
+    omitted = compact_omitted(package.systems, profile)
+    if omitted:
+        lines.append(
+            f"• Hidden by the limit: {omitted}. Increase max optional in the profile."
         )
     return lines
 
@@ -594,7 +763,7 @@ def render_report(
     lines = _header(profile, package, now)
 
     if chosen is DetailLevel.COMPACT:
-        lines.extend(_compact_lines(package, locale))
+        lines.extend(_compact_lines(package, profile))
     else:
         lines.append("")
         lines.append("**Системы**" if locale is Locale.RU else "**Systems**")

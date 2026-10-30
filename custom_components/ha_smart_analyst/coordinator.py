@@ -33,6 +33,8 @@ from .const import (
     CONF_QUIET_START,
     CONF_TELEGRAM_RECIPIENTS,
     CONF_TELEGRAM_SERVICE,
+    DEFAULT_AI_BASE_URL,
+    DEFAULT_AI_MODEL,
     DOMAIN,
     EVENT_DATA_QUALITY,
     EVENT_INCIDENT_OPENED,
@@ -77,6 +79,7 @@ from .core import (
     SystemPreset,
     SystemSection,
     ValidationStatus,
+    ValueType,
     Window,
     build_observation,
     build_package,
@@ -87,23 +90,28 @@ from .core import (
     history_facts,
     history_trend,
     load_config,
+    measurement_rank,
     new_identifier,
     next_run_at,
+    pair_facts,
     parse_payload,
     parse_rule,
     referenced_measurements,
     render_report,
+    system_coverage,
+    trim_package,
     validate_response,
 )
 from .core.observations import unconfigured
-from .core.units import compatible, convert
-from .history_provider import CachedHistory
+from .history_provider import CachedHistory, HistorySource
 from .provider import DeepSeekProvider, ProviderConfig, ProviderError
 
 _LOGGER = logging.getLogger(__name__)
 
 HISTORY_DEFAULT_WINDOW = 3_600
 DEFAULT_TEST_TEXT = "Проверка уведомлений HA Smart Analyst"
+#: Повторный клик в этом окне возвращает тот же отчёт и не отправляет его снова.
+REPORT_DEDUPE_SECONDS = 10
 
 
 @dataclass
@@ -150,11 +158,14 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         self._pending = False
         self._tasks: set[asyncio.Task[Any]] = set()
         self._ai_provider: DeepSeekProvider | None = None
+        self._ai_signature: tuple[str, str, str] | None = None
         self._ai_error: str | None = None
         self._last_report_at: datetime | None = None
         self._tokens_used = 0
         self.last_delivery: dict[str, Any] | None = None
         self._report_next: dict[str, datetime] = {}
+        self._reports_in_flight: dict[str, asyncio.Task[RenderedReport]] = {}
+        self._report_cache: dict[str, tuple[datetime, RenderedReport]] = {}
 
     # -- жизненный цикл -----------------------------------------------
     async def async_initialize(self) -> None:
@@ -329,6 +340,8 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
     async def async_reload_options(self) -> None:
         """Перечитать Options Flow без потери накопленного состояния."""
         self._apply_settings()
+        self._ai_provider = None
+        self._ai_signature = None
         self._schedule_save()
         await self._async_evaluate()
 
@@ -395,6 +408,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         unit: str | None = None,
         registry_entry_id: str | None = None,
         attribute: str | None = None,
+        max_age_seconds: int | None = None,
     ) -> Measurement:
         """Добавить сущность в систему с подтверждённой ролью (ENT-02)."""
         if self.model.systems.get(system_id) is None:
@@ -418,6 +432,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                 attribute=attribute,
             ),
             config_status=ValidationStatus.CONFIRMED,
+            max_age_seconds=max_age_seconds,
         )
         self.model.add_measurement(measurement)
         await self._after_model_change()
@@ -494,32 +509,44 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
             if measurement.source is None:
                 continue
             entity_id = measurement.source.entity_id
-            state = self.hass.states.get(entity_id)
             attribute = measurement.source.attribute
-            if state is None:
-                observations[measurement.id] = unconfigured(
-                    measurement.id, entity_id, now, measurement.unit
-                )
-                continue
-            raw: object = state.state
-            if attribute:
-                if attribute not in state.attributes:
+            try:
+                state = self.hass.states.get(entity_id)
+                if state is None:
                     observations[measurement.id] = unconfigured(
                         measurement.id, entity_id, now, measurement.unit
                     )
                     continue
-                raw = state.attributes.get(attribute)
-            observations[measurement.id] = build_observation(
-                source_id=measurement.id,
-                entity_id=entity_id,
-                raw_state=raw,
-                now=now,
-                unit=state.attributes.get("unit_of_measurement") or measurement.unit,
-                last_changed=state.last_changed,
-                last_updated=state.last_updated,
-                last_reported=getattr(state, "last_reported", None),
-                expected_numeric=measurement.kind in {"numeric", "composite"} or attribute is not None,
-            )
+                raw: object = state.state
+                if attribute:
+                    if attribute not in state.attributes:
+                        observations[measurement.id] = unconfigured(
+                            measurement.id, entity_id, now, measurement.unit
+                        )
+                        continue
+                    raw = state.attributes.get(attribute)
+                observations[measurement.id] = build_observation(
+                    source_id=measurement.id,
+                    entity_id=entity_id,
+                    raw_state=raw,
+                    now=now,
+                    unit=state.attributes.get("unit_of_measurement") or measurement.unit,
+                    last_changed=state.last_changed,
+                    last_updated=state.last_updated,
+                    last_reported=getattr(state, "last_reported", None),
+                    expected_numeric=measurement.kind in {"numeric", "composite"}
+                    or attribute is not None,
+                    max_age=(
+                        timedelta(seconds=measurement.max_age_seconds)
+                        if measurement.max_age_seconds
+                        else None
+                    ),
+                )
+            except Exception as err:  # noqa: BLE001 - один датчик не скрывает остальные
+                _LOGGER.warning("Датчик %s не прочитан: %s", measurement.name, err)
+                observations[measurement.id] = unconfigured(
+                    measurement.id, entity_id, now, measurement.unit
+                )
 
         pending = [item for item in self.model.measurements.values() if item.composite is not None]
         for _ in range(5):
@@ -546,17 +573,23 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                 windows.append(seconds)
         return max(windows)
 
-    async def _async_load_history(self, now: datetime) -> CachedHistory | None:
-        entity_map = {
-            measurement.id: measurement.source.entity_id
+    def _history_sources(self) -> dict[str, HistorySource]:
+        return {
+            measurement.id: HistorySource(
+                entity_id=measurement.source.entity_id,
+                attribute=measurement.source.attribute,
+            )
             for measurement in self.model.measurements.values()
             if measurement.source is not None
         }
-        if not entity_map:
+
+    async def _async_load_history(self, now: datetime) -> CachedHistory | None:
+        sources = self._history_sources()
+        if not sources:
             return None
         window = Window.last(now, self._history_window())
         try:
-            return await CachedHistory.async_load(self.hass, window, entity_map)
+            return await CachedHistory.async_load(self.hass, window, sources)
         except Exception as err:  # noqa: BLE001 - Recorder не должен ронять интеграцию
             _LOGGER.debug("История недоступна: %s", err)
             return None
@@ -861,8 +894,37 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
     async def async_generate_report(
         self, profile_id: str | None = None, use_ai: bool | None = None
     ) -> RenderedReport:
-        now = dt_util.utcnow()
+        """Сформировать отчёт; повторный клик не дублирует отправку.
+
+        Пока отчёт собирается, второй вызов ждёт тот же результат; в течение
+        10 секунд после готовности возвращается тот же отчёт без новой отправки.
+        """
         profile = self._profile(profile_id)
+        cached = self._report_cache.get(profile.id)
+        if (
+            cached is not None
+            and (dt_util.utcnow() - cached[0]).total_seconds() < REPORT_DEDUPE_SECONDS
+        ):
+            return cached[1]
+        existing = self._reports_in_flight.get(profile.id)
+        if existing is not None and not existing.done():
+            return await asyncio.shield(existing)
+        task = self.hass.async_create_task(
+            self._async_generate_report(profile, use_ai)
+        )
+        self._reports_in_flight[profile.id] = task
+        try:
+            rendered = await asyncio.shield(task)
+        finally:
+            if self._reports_in_flight.get(profile.id) is task:
+                self._reports_in_flight.pop(profile.id, None)
+        self._report_cache[profile.id] = (dt_util.utcnow(), rendered)
+        return rendered
+
+    async def _async_generate_report(
+        self, profile: ReportProfile, use_ai: bool | None
+    ) -> RenderedReport:
+        now = dt_util.utcnow()
         observations = self.build_observations(now)
         window = Window.last(now, profile.history_seconds)
         sections = await self._async_build_sections(profile, observations, window)
@@ -903,7 +965,6 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
             response = await self._async_analyze(package)
         ai_error = None if response is not None or not ai_enabled else self._ai_error
         local_severity = _max_severity(incident_digests)
-        self._last_report_at = now
         rendered = render_report(
             profile,
             package,
@@ -913,9 +974,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
             local_severity=local_severity,
             ai_error=ai_error,
         )
-        recipients = list(
-            profile.recipients or self.notification_targets()
-        )
+        recipients = list(profile.recipients or self.notification_targets())
         for recipient in recipients:
             self.queue.enqueue(
                 event_key=f"report:{now.isoformat()}:{profile.id}",
@@ -925,48 +984,64 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                 now=now,
             )
         await self._async_flush_queue()
+        self._last_report_at = now
         self._schedule_save()
         return rendered
 
     async def _async_analyze(self, package: AnalysisPackage) -> AIResponse | None:
         provider = self._provider()
         if provider is None:
-            self._ai_error = "провайдер ИИ не настроен"
+            self._ai_error = (
+                "провайдер ИИ не настроен: добавьте ключ DeepSeek в настройках интеграции"
+            )
             return None
         try:
-            raw = await provider.async_analyze(package)
+            raw = await provider.async_analyze(trim_package(package))
         except ProviderError as err:
             self._ai_error = str(err)
-            _LOGGER.warning("DeepSeek недоступен: %s", err)
+            _LOGGER.warning("DeepSeek недоступен (%s): %s", err.kind, err)
             return None
         try:
             payload = parse_payload(raw)
         except SmartAnalystError as err:
-            self._ai_error = str(err)
+            self._ai_error = f"ответ модели не разобран: {err}"
             return None
         result = validate_response(payload, package)
         if not result.ok or result.response is None:
-            self._ai_error = result.error_text
+            self._ai_error = f"ответ не прошёл проверку: {result.error_text}"
             return None
         self._ai_error = None
         self._tokens_used += max(1, len(raw) // 4)
         return result.response
 
-    def _provider(self) -> DeepSeekProvider | None:
-        if self._ai_provider is not None:
-            return self._ai_provider
-        entry = self.entry
-        api_key = entry.data.get("ai_api_key") or entry.options.get("ai_api_key")
+    def _ai_config(self) -> ProviderConfig | None:
+        """Настройки ИИ: Options Flow важнее исходных данных записи."""
+        merged = {**dict(self.entry.data), **dict(self.entry.options)}
+        api_key = str(merged.get("ai_api_key") or "").strip()
         if not api_key:
             return None
-        self._ai_provider = DeepSeekProvider(
-            async_get_clientsession(self.hass),
-            ProviderConfig(
-                api_key=str(api_key),
-                base_url=str(entry.data.get("ai_base_url") or "https://api.deepseek.com"),
-                model=str(entry.data.get("ai_model") or "deepseek-flash"),
+        settings = self.config_state.settings
+        return ProviderConfig(
+            api_key=api_key,
+            base_url=str(merged.get("ai_base_url") or DEFAULT_AI_BASE_URL),
+            model=str(
+                merged.get("ai_model") or settings.get("ai_model") or DEFAULT_AI_MODEL
             ),
         )
+
+    def _provider(self) -> DeepSeekProvider | None:
+        """Провайдер пересоздаётся, когда меняются ключ, URL или модель."""
+        config = self._ai_config()
+        if config is None:
+            self._ai_provider = None
+            self._ai_signature = None
+            return None
+        signature = (config.api_key, config.base_url, config.model)
+        if self._ai_provider is None or self._ai_signature != signature:
+            self._ai_provider = DeepSeekProvider(
+                async_get_clientsession(self.hass), config
+            )
+            self._ai_signature = signature
         return self._ai_provider
 
     def _profile(self, profile_id: str | None) -> ReportProfile:
@@ -975,6 +1050,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
             for profile in profiles:
                 if profile.id == profile_id:
                     return profile
+            raise SmartAnalystError(f"профиль отчёта {profile_id!r} не найден")
         if profiles:
             return profiles[0]
         return ReportProfile(
@@ -992,66 +1068,159 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         window: Window,
     ) -> tuple[SystemSection, ...]:
         """Собрать разделы отчёта с историей, уставками и привязкой к оборудованию."""
-        entity_map = {
-            measurement.id: measurement.source.entity_id
-            for measurement in self.model.measurements.values()
-            if measurement.source is not None
-        }
+        sources = self._history_sources()
         history: CachedHistory | None = None
-        if entity_map:
+        if sources:
             try:
-                history = await CachedHistory.async_load(self.hass, window, entity_map)
+                history = await CachedHistory.async_load(self.hass, window, sources)
             except Exception as err:  # noqa: BLE001 - без истории отчёт остаётся честным
                 _LOGGER.debug("История для отчёта недоступна: %s", err)
 
-        sections: list[SystemSection] = []
+        required = set(profile.required_measurement_ids)
+        present: set[str] = set()
+
+        def visible(measurement: Measurement) -> bool:
+            return measurement.report_visible or measurement.id in required
+
+        def included_system(system: System) -> bool:
+            if not profile.system_ids or system.id in profile.system_ids:
+                return True
+            return any(
+                measurement.id in required
+                for measurement in self.model.measurements_of(system.id)
+            )
+
+        groups: list[tuple[str, str, list[Measurement]]] = []
         for system in self.model.systems.values():
-            if profile.system_ids and system.id not in profile.system_ids:
+            if not included_system(system):
                 continue
             items = [
                 measurement
                 for measurement in self.model.measurements_of(system.id)
-                if measurement.id in observations and measurement.report_visible
+                if measurement.id in observations and visible(measurement)
             ]
             if not items:
                 continue
-            facts = list(_pair_facts(items, observations))
-            coverage_values: list[float] = []
-            trend_text: str | None = None
-            numeric_items = [item for item in items if item.kind in {"numeric", "composite"}][:8]
-            if history is not None:
-                for measurement in numeric_items:
-                    samples = history.samples(measurement.id, window)
-                    unit = measurement.unit or observations[measurement.id].unit
-                    facts.extend(
-                        history_facts(measurement.id, measurement.name, samples, window, unit)
-                    )
-                    coverage, trend = history_trend(
-                        samples, window, unit, profile.locale
-                    )
-                    if coverage:
-                        coverage_values.append(coverage)
-                    if trend_text is None and trend:
-                        trend_text = trend
+            groups.append((system.id, system.name, items))
+            present.update(measurement.id for measurement in items)
+
+        if not profile.group_by_system:
+            merged = [measurement for _, _, items in groups for measurement in items]
+            site_name = (
+                self.model.site.name if self.model.site is not None else "Все показатели"
+            )
+            groups = [("all", site_name, merged)] if merged else []
+
+        missing = [
+            measurement_id
+            for measurement_id in profile.required_measurement_ids
+            if measurement_id not in present
+        ]
+
+        sections: list[SystemSection] = []
+        for system_id, system_name, items in groups:
+            sections.append(
+                self._build_section(
+                    profile,
+                    system_id,
+                    system_name,
+                    items,
+                    observations,
+                    history,
+                    window,
+                    required,
+                )
+            )
+        if missing:
+            missing_facts = tuple(
+                self._missing_measurement_fact(measurement_id, required)
+                for measurement_id in missing
+            )
             sections.append(
                 SystemSection(
-                    id=system.id,
-                    name=system.name,
-                    measurements=tuple(
-                        MeasurementFact.from_observation(
-                            measurement.id,
-                            measurement.name,
-                            measurement.role,
-                            observations[measurement.id],
-                        )
-                        for measurement in items
-                    ),
-                    facts=tuple(facts),
-                    coverage=max(coverage_values) if coverage_values else None,
-                    trend=trend_text,
+                    id="profile",
+                    name="Показатели профиля",
+                    measurements=missing_facts,
                 )
             )
         return tuple(sections)
+
+    def _build_section(
+        self,
+        profile: ReportProfile,
+        section_id: str,
+        section_name: str,
+        items: list[Measurement],
+        observations: dict[str, Observation],
+        history: CachedHistory | None,
+        window: Window,
+        required: set[str],
+    ) -> SystemSection:
+        facts: list[Fact] = list(pair_facts(items, observations))
+        coverages: list[float] = []
+        trend_text: str | None = None
+        coverage_by_measurement: dict[str, float] = {}
+        for measurement in items:
+            if measurement.source is None:
+                continue
+            observation = observations[measurement.id]
+            if observation.value_type is not ValueType.NUMBER:
+                continue
+            samples = history.samples(measurement.id, window) if history is not None else ()
+            unit = measurement.unit or observations[measurement.id].unit
+            if history is not None:
+                counter = measurement.role is MeasurementRole.ENERGY
+                facts.extend(
+                    history_facts(
+                        measurement.id,
+                        measurement.name,
+                        samples,
+                        window,
+                        unit,
+                        counter=counter,
+                    )
+                )
+                coverage, trend = history_trend(samples, window, unit, profile.locale)
+                if coverage is not None:
+                    coverages.append(coverage)
+                    coverage_by_measurement[measurement.id] = coverage
+                if trend and trend_text is None:
+                    trend_text = trend
+        measurement_facts = [
+            MeasurementFact.from_observation(
+                measurement.id,
+                measurement.name,
+                measurement.role,
+                observations[measurement.id],
+                required=measurement.id in required,
+                coverage=coverage_by_measurement.get(measurement.id),
+            )
+            for measurement in items
+        ]
+        measurement_facts.sort(key=lambda fact: measurement_rank(profile, fact))
+        return SystemSection(
+            id=section_id,
+            name=section_name,
+            measurements=tuple(measurement_facts),
+            facts=tuple(facts),
+            coverage=system_coverage(coverages),
+            trend=trend_text,
+        )
+
+    def _missing_measurement_fact(
+        self, measurement_id: str, required: set[str]
+    ) -> MeasurementFact:
+        measurement = self.model.measurement(measurement_id)
+        name = measurement.name if measurement is not None else measurement_id
+        return MeasurementFact(
+            id=measurement_id,
+            name=name,
+            role=measurement.role if measurement is not None else MeasurementRole.CUSTOM,
+            value=None,
+            unit=measurement.unit if measurement is not None else None,
+            quality=Quality.UNCONFIGURED,
+            required=measurement_id in required,
+        )
 
     # -- диагностика --------------------------------------------------
     def _publish_snapshot(self, now: datetime, observations: dict[str, Observation]) -> None:
@@ -1121,53 +1290,6 @@ def _max_severity(digests: tuple[Any, ...]) -> Severity:
         if order[item.severity] > order[result]:
             result = item.severity
     return result
-
-
-def _pair_facts(
-    measurements: list[Measurement], observations: dict[str, Observation]
-) -> tuple[Fact, ...]:
-    """Отклонение «факт − уставка» только внутри одного оборудования (SEM-04).
-
-    Если оборудование не задано и пара неоднозначна, факт не выдумывается.
-    """
-    groups: dict[str | None, list[Measurement]] = {}
-    for measurement in measurements:
-        groups.setdefault(measurement.equipment_id, []).append(measurement)
-    facts: list[Fact] = []
-    for equipment_id, group in groups.items():
-        actuals = [item for item in group if item.role is MeasurementRole.ACTUAL]
-        setpoints = [item for item in group if item.role is MeasurementRole.SETPOINT]
-        if equipment_id is None and (len(actuals) != 1 or len(setpoints) != 1):
-            continue
-        if not actuals or not setpoints:
-            continue
-        actual, setpoint = actuals[0], setpoints[0]
-        actual_observation = observations.get(actual.id)
-        setpoint_observation = observations.get(setpoint.id)
-        if (
-            actual_observation is None
-            or setpoint_observation is None
-            or actual_observation.numeric_value is None
-            or setpoint_observation.numeric_value is None
-        ):
-            continue
-        actual_unit = actual_observation.unit or actual.unit
-        setpoint_unit = setpoint_observation.unit or setpoint.unit
-        setpoint_value = setpoint_observation.numeric_value
-        if setpoint_unit and actual_unit and setpoint_unit != actual_unit:
-            if not compatible(setpoint_unit, actual_unit):
-                continue
-            setpoint_value = convert(setpoint_value, setpoint_unit, actual_unit)
-        facts.append(
-            Fact(
-                id=f"fact_gap_{actual.id}",
-                kind="difference",
-                value=round(actual_observation.numeric_value - setpoint_value, 3),
-                unit=actual_unit,
-                label=f"{actual.name} − {setpoint.name}",
-            )
-        )
-    return tuple(facts)
 
 
 def _incident_text(rule: Rule, incident: Incident, event: RuleEvent, *, resolved: bool) -> str:

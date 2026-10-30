@@ -1,3 +1,12 @@
+import {
+  errorMessage,
+  parseSchedule,
+  profileDraft,
+  readMultiSelect,
+  reportMessage,
+  servicePayload,
+} from "./panel-helpers.js";
+
 const ROLES = [
   ["custom", "custom"],
   ["actual", "actual"],
@@ -62,6 +71,9 @@ class HaSmartAnalystPanel extends HTMLElement {
     this._entitiesLoading = false;
     this._entityQuery = "";
     this._reportText = "";
+    this._reportMeta = null;
+    this._reportLoading = false;
+    this._editingProfile = null;
   }
 
   set hass(hass) {
@@ -116,16 +128,7 @@ class HaSmartAnalystPanel extends HTMLElement {
   }
 
   _message(err) {
-    if (!err) {
-      return "неизвестная ошибка";
-    }
-    if (err.message) {
-      return err.message;
-    }
-    if (err.error && err.error.message) {
-      return err.error.message;
-    }
-    return String(err);
+    return errorMessage(err);
   }
 
   _ok(text) {
@@ -155,6 +158,7 @@ class HaSmartAnalystPanel extends HTMLElement {
     this._dialog = null;
     this._dialogSystemId = null;
     this._entities = null;
+    this._editingProfile = null;
     this._render();
   }
 
@@ -190,6 +194,9 @@ class HaSmartAnalystPanel extends HTMLElement {
 
   async _addMeasurement(button) {
     const dataset = button.dataset;
+    const root = this.shadowRoot;
+    const attribute = (root.querySelector("#entity-attribute")?.value || "").trim();
+    const maxAgeMinutes = parseInt(root.querySelector("#entity-max-age")?.value || "0", 10);
     try {
       await this._call("measurement/add", {
         system_id: this._dialogSystemId,
@@ -198,6 +205,9 @@ class HaSmartAnalystPanel extends HTMLElement {
         role: dataset.role || "custom",
         unit: dataset.unit || undefined,
         registry_entry_id: dataset.registry || undefined,
+        attribute: attribute || undefined,
+        max_age_seconds:
+          Number.isFinite(maxAgeMinutes) && maxAgeMinutes > 0 ? maxAgeMinutes * 60 : undefined,
       });
       this._ok(`Датчик «${dataset.name || dataset.entity}» добавлен`);
       await this._load();
@@ -300,34 +310,40 @@ class HaSmartAnalystPanel extends HTMLElement {
 
   async _submitProfile() {
     const root = this.shadowRoot;
-    const name = root.querySelector("#profile-name").value.trim();
-    const locale = root.querySelector("#profile-locale").value;
-    const detail = root.querySelector("#profile-detail").value;
-    const timesRaw = root.querySelector("#profile-times").value.trim();
-    const scheduleTimes = timesRaw
-      ? timesRaw.split(",").map((item) => item.trim()).filter(Boolean)
-      : [];
     const days = root.querySelector("#profile-days").value;
-    const weekdays = days === "weekdays" ? [0, 1, 2, 3, 4] : days === "weekends" ? [5, 6] : [];
+    const values = {
+      name: root.querySelector("#profile-name").value,
+      locale: root.querySelector("#profile-locale").value,
+      detail: root.querySelector("#profile-detail").value,
+      timezone: (this.hass.config && this.hass.config.time_zone) || "UTC",
+      scheduleTimes: parseSchedule(root.querySelector("#profile-times").value),
+      weekdays: days === "weekdays" ? [0, 1, 2, 3, 4] : days === "weekends" ? [5, 6] : [],
+      required: readMultiSelect(root, "#profile-required"),
+      optional: readMultiSelect(root, "#profile-optional"),
+      maxOptional: parseInt(root.querySelector("#profile-max-optional").value, 10),
+      groupBySystem: root.querySelector("#profile-group").checked,
+      showStates: root.querySelector("#profile-states").checked,
+    };
+    const draft = profileDraft(values, this._editingProfile);
     try {
-      await this._call("profile/save", {
-        profile: {
-          id: `profile_${Math.random().toString(36).slice(2, 10)}`,
-          name,
-          locale,
-          detail,
-          timezone: this.hass.config.time_zone,
-          report_type: scheduleTimes.length ? "scheduled" : "on_demand",
-          schedule_times: scheduleTimes,
-          schedule_weekdays: weekdays,
-        },
-      });
+      await this._call("profile/save", { profile: draft });
+      const editing = Boolean(this._editingProfile);
       this._dialog = null;
+      this._editingProfile = null;
       await this._load();
-      this._ok(`Профиль «${name}» сохранён`);
+      this._ok(
+        editing ? `Профиль «${draft.name}» обновлён` : `Профиль «${draft.name}» сохранён`
+      );
     } catch (err) {
       this._fail(err);
     }
+  }
+
+  _openProfile(profileId) {
+    const profile =
+      ((this._data && this._data.reports) || []).find((item) => item.id === profileId) || null;
+    this._editingProfile = profile;
+    this._open("profile");
   }
 
   async _deleteProfile(profileId) {
@@ -344,6 +360,12 @@ class HaSmartAnalystPanel extends HTMLElement {
   }
 
   async _generateReport(profileId) {
+    if (this._reportLoading) {
+      return;
+    }
+    this._reportLoading = true;
+    this._flash = { type: "ok", text: "Формирую отчёт…" };
+    this._render();
     try {
       const response = await this.hass.callService(
         "ha_smart_analyst",
@@ -353,38 +375,27 @@ class HaSmartAnalystPanel extends HTMLElement {
         false,
         true
       );
-      const payload = this._servicePayload(response);
-      const text = payload.text || "";
-      if (!text) {
+      const message = reportMessage(response);
+      if (!message) {
         this._fail(
-          "Сервис вернул пустой отчёт: " + JSON.stringify(response || {}).slice(0, 300)
+          "Сервис не вернул текст отчёта. Проверьте «Журнал» Home Assistant: " +
+            "возможно, в профиле нет доступных датчиков."
         );
         return;
       }
-      this._reportText = text;
+      this._reportText = message.text;
+      this._reportMeta = message;
       this._open("report");
     } catch (err) {
       this._fail(err);
+    } finally {
+      this._reportLoading = false;
+      this._render();
     }
   }
 
   _servicePayload(response) {
-    if (!response) {
-      return {};
-    }
-    if (typeof response === "string") {
-      return { text: response };
-    }
-    if (typeof response.text === "string") {
-      return response;
-    }
-    if (response.response && typeof response.response === "object") {
-      return response.response;
-    }
-    if (response.service_response && typeof response.service_response === "object") {
-      return response.service_response;
-    }
-    return response;
+    return servicePayload(response);
   }
 
   async _acknowledge(incidentId) {
@@ -544,39 +555,83 @@ class HaSmartAnalystPanel extends HTMLElement {
       return this._renderRuleDialog();
     }
     if (this._dialog === "profile") {
+      const profile = this._editingProfile || {};
+      const weekdays = profile.schedule_weekdays || [];
+      const daysValue =
+        weekdays.length === 5 && weekdays.every((day, index) => day === index)
+          ? "weekdays"
+          : weekdays.length === 2 && weekdays.includes(5) && weekdays.includes(6)
+            ? "weekends"
+            : "every";
       return `<div class="card">
-        <h2>Новый профиль отчёта</h2>
+        <h2>${this._editingProfile ? "Профиль отчёта" : "Новый профиль отчёта"}</h2>
         <div class="row">
-          <label>Название<input id="profile-name" value="Отчёт"></label>
-          <label>Язык<select id="profile-locale"><option value="ru">ru</option><option value="en">en</option></select></label>
+          <label>Название<input id="profile-name" value="${this._escape(profile.name || "Отчёт")}"></label>
+          <label>Язык<select id="profile-locale">
+            <option value="ru"${profile.locale !== "en" ? " selected" : ""}>ru</option>
+            <option value="en"${profile.locale === "en" ? " selected" : ""}>en</option>
+          </select></label>
           <label>Детализация<select id="profile-detail">
-            <option value="adaptive">adaptive</option>
-            <option value="compact">compact</option>
-            <option value="standard">standard</option>
-            <option value="detailed">detailed</option>
+            ${["adaptive", "compact", "standard", "detailed"]
+              .map(
+                (value) =>
+                  `<option value="${value}"${(profile.detail || "adaptive") === value ? " selected" : ""}>${value}</option>`
+              )
+              .join("")}
           </select></label>
         </div>
         <div class="row">
-          <label>Время (HH:MM, через запятую)<input id="profile-times" placeholder="08:00, 20:00"></label>
+          <label>Время (HH:MM, через запятую)<input id="profile-times" value="${this._escape((profile.schedule_times || []).join(", "))}" placeholder="08:00, 20:00"></label>
           <label>Дни<select id="profile-days">
-            <option value="every">каждый день</option>
-            <option value="weekdays">по будням</option>
-            <option value="weekends">по выходным</option>
+            <option value="every"${daysValue === "every" ? " selected" : ""}>каждый день</option>
+            <option value="weekdays"${daysValue === "weekdays" ? " selected" : ""}>по будням</option>
+            <option value="weekends"${daysValue === "weekends" ? " selected" : ""}>по выходным</option>
           </select></label>
+        </div>
+        <div class="row">
+          <label>Обязательные показатели<select id="profile-required" multiple size="6">${this._measurementOptions(profile.required_measurement_ids)}</select></label>
+          <label>Дополнительные показатели<select id="profile-optional" multiple size="6">${this._measurementOptions(profile.optional_measurement_ids)}</select></label>
+        </div>
+        <div class="row">
+          <label>Лимит дополнительных<input id="profile-max-optional" type="number" min="0" max="100" value="${this._escape(String(profile.max_optional ?? 8))}"></label>
+          <label><input id="profile-group" type="checkbox"${profile.group_by_system === false ? "" : " checked"}> Группировать по системам</label>
+          <label><input id="profile-states" type="checkbox"${profile.show_states === false ? "" : " checked"}> Показывать состояния и режимы</label>
+        </div>
+        <div class="row">
           <button class="primary" data-action="submit-profile">Сохранить</button>
           <button data-action="close">Отмена</button>
         </div>
-        <p class="muted">Пустое время — отчёт только по кнопке. Время указывается в часовом поясе Home Assistant.</p>
+        <p class="muted">Пустое время — отчёт только по кнопке. Обязательные показатели попадают в отчёт всегда, лимит действует только на дополнительные. Время указывается в часовом поясе Home Assistant.</p>
       </div>`;
     }
     if (this._dialog === "report") {
+      const meta = this._reportMeta || {};
+      const source = meta.usedAi
+        ? "заключение DeepSeek"
+        : "локальные факты (ИИ не использован)";
+      const detail = meta.detail ? ` · ${meta.detail}` : "";
       return `<div class="card">
         <h2>Отчёт</h2>
+        <p class="muted">Источник: ${this._escape(source)}${this._escape(detail)}</p>
         <pre>${this._escape(this._reportText)}</pre>
         <button data-action="close">Закрыть</button>
       </div>`;
     }
     return "";
+  }
+
+  _measurementOptions(selected = []) {
+    const chosen = new Set(selected || []);
+    const options = [];
+    for (const system of (this._data && this._data.systems) || []) {
+      for (const item of system.measurements || []) {
+        const label = `${system.name}: ${item.name}`;
+        options.push(
+          `<option value="${this._escape(item.id)}"${chosen.has(item.id) ? " selected" : ""}>${this._escape(label)}</option>`
+        );
+      }
+    }
+    return options.join("");
   }
 
   _renderPicker() {
@@ -608,10 +663,12 @@ class HaSmartAnalystPanel extends HTMLElement {
       <h2>Добавить датчик</h2>
       <div class="row">
         <label>Поиск<input id="entity-filter" value="${this._escape(this._entityQuery)}" placeholder="имя, entity_id, устройство"></label>
+        <label>Атрибут<input id="entity-attribute" placeholder="current_temperature"></label>
+        <label>Макс. возраст, мин<input id="entity-max-age" type="number" min="0" placeholder="0"></label>
         <button data-action="filter-entities">Найти</button>
         <button data-action="close">Готово</button>
       </div>
-      <p class="muted">Найдено: ${entities.length} из ${this._entities.total || 0}. Подсказка — предположение, проверьте роль перед добавлением.</p>
+      <p class="muted">Найдено: ${entities.length} из ${this._entities.total || 0}. Атрибут нужен для climate: температура лежит в current_temperature. Максимальный возраст 0 — проверка отключена. Подсказка — предположение, проверьте роль перед добавлением.</p>
       <table><thead><tr><th>Сущность</th><th>Ед.</th><th>Подсказка</th><th>Причина</th><th></th></tr></thead>
       <tbody>${rows || '<tr><td colspan="5" class="muted">Ничего не найдено</td></tr>'}</tbody></table>
     </div>`;
@@ -801,7 +858,8 @@ class HaSmartAnalystPanel extends HTMLElement {
           item.next_run ? new Date(item.next_run).toLocaleString() : "—",
           item.detail,
           item.locale,
-          `<button class="primary" data-action="generate-report" data-profile="${this._escape(item.id)}">Сформировать</button>
+          `<button class="primary" data-action="generate-report" data-profile="${this._escape(item.id)}"${this._reportLoading ? " disabled" : ""}>Сформировать</button>
+           <button data-action="edit-profile" data-profile="${this._escape(item.id)}">Изменить</button>
            <button class="danger" data-action="delete-profile" data-profile="${this._escape(item.id)}">Удалить</button>`,
         ])
       )
@@ -908,6 +966,9 @@ class HaSmartAnalystPanel extends HTMLElement {
         break;
       case "delete-profile":
         this._deleteProfile(dataset.profile);
+        break;
+      case "edit-profile":
+        this._openProfile(dataset.profile);
         break;
       case "ack":
         this._acknowledge(dataset.incident);

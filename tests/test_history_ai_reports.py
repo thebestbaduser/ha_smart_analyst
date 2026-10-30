@@ -333,7 +333,10 @@ def test_history_facts_and_trend() -> None:
 def test_history_facts_absent_without_data() -> None:
     window = Window.last(NOW, 3_600)
     sparse = samples([20.0, 20.5], NOW - timedelta(seconds=60), 60)
-    assert history_facts("boiler_temp", "Подача", sparse, window, "°C") == ()
+    facts = history_facts("boiler_temp", "Подача", sparse, window, "°C")
+    assert len(facts) == 1
+    assert facts[0].id == "fact_boiler_temp_coverage"
+    assert "недостаточно данных" in facts[0].label
     coverage, trend = history_trend(sparse, window, "°C")
     assert trend is None
     assert coverage < 0.1

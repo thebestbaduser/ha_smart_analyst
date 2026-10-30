@@ -37,7 +37,7 @@
           "label": "Подача котла − Цель котла"
         }
       ],
-      "history": { "coverage": 0.0, "trend": null }
+      "history": { "coverage": 0.0, "coverage_available": true, "trend": null }
     }
   ],
   "incidents": [],

@@ -71,9 +71,19 @@ class Fact:
     value: float | str | bool | None
     unit: str | None = None
     label: str = ""
+    source: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "kind": self.kind, "value": self.value, "unit": self.unit, "label": self.label}
+        payload = {
+            "id": self.id,
+            "kind": self.kind,
+            "value": self.value,
+            "unit": self.unit,
+            "label": self.label,
+        }
+        if self.source is not None:
+            payload["source"] = self.source
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,9 +96,11 @@ class MeasurementFact:
     value: float | str | bool | None
     unit: str | None
     quality: Quality
+    required: bool = False
+    coverage: float | None = None
 
     @classmethod
-    def from_observation(cls, measurement_id: str, name: str, role: MeasurementRole, observation: Observation) -> MeasurementFact:
+    def from_observation(cls, measurement_id: str, name: str, role: MeasurementRole, observation: Observation, *, required: bool = False, coverage: float | None = None) -> MeasurementFact:
         return cls(
             id=measurement_id,
             name=name,
@@ -96,10 +108,12 @@ class MeasurementFact:
             value=observation.value,
             unit=observation.unit,
             quality=observation.quality,
+            required=required,
+            coverage=coverage,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "id": self.id,
             "name": self.name,
             "role": self.role.value,
@@ -107,6 +121,11 @@ class MeasurementFact:
             "unit": self.unit,
             "quality": self.quality.value,
         }
+        if self.required:
+            payload["required"] = True
+        if self.coverage is not None:
+            payload["coverage"] = round(self.coverage, 3)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +145,11 @@ class SystemSection:
             "name": self.name,
             "measurements": [item.to_dict() for item in self.measurements],
             "facts": [item.to_dict() for item in self.facts],
-            "history": {"coverage": self.coverage if self.coverage is not None else 0.0, "trend": self.trend},
+            "history": {
+                "coverage": self.coverage,
+                "coverage_available": self.coverage is not None,
+                "trend": self.trend,
+            },
         }
 
 
@@ -221,6 +244,55 @@ def build_package(
         systems=tuple(systems),
         incidents=tuple(incidents),
         constraints=tuple(constraints),
+    )
+
+
+MAX_AI_MEASUREMENTS_PER_SYSTEM = 60
+MAX_AI_FACTS_PER_SYSTEM = 120
+
+
+def trim_package(
+    package: AnalysisPackage,
+    *,
+    max_measurements: int = MAX_AI_MEASUREMENTS_PER_SYSTEM,
+    max_facts: int = MAX_AI_FACTS_PER_SYSTEM,
+) -> AnalysisPackage:
+    """Урезать необязательные данные запроса, сохранив обязательные показания.
+
+    Локальный отчёт от этого не меняется: ограничение действует только на пакет,
+    который уходит провайдеру ИИ.
+    """
+    systems: list[SystemSection] = []
+    for system in package.systems:
+        required = [item for item in system.measurements if item.required]
+        optional = [item for item in system.measurements if not item.required]
+        keep = required + optional[: max(0, max_measurements - len(required))]
+        measurements = tuple(keep)
+        prefixes = tuple(f"fact_{item.id}_" for item in measurements if item.required)
+        facts = tuple(
+            sorted(
+                system.facts,
+                key=lambda fact: 0 if any(fact.id.startswith(prefix) for prefix in prefixes) else 1,
+            )[:max_facts]
+        )
+        systems.append(
+            SystemSection(
+                id=system.id,
+                name=system.name,
+                measurements=measurements,
+                facts=facts,
+                coverage=system.coverage,
+                trend=system.trend,
+            )
+        )
+    return AnalysisPackage(
+        site_id=package.site_id,
+        generated_at=package.generated_at,
+        window_start=package.window_start,
+        window_end=package.window_end,
+        systems=tuple(systems),
+        incidents=package.incidents,
+        constraints=package.constraints,
     )
 
 

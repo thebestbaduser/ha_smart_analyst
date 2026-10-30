@@ -215,12 +215,15 @@ class Measurement:
     config_status: ValidationStatus = ValidationStatus.UNVERIFIED
     source: SourceRef | None = None
     composite: Composite | None = None
+    max_age_seconds: int | None = None
 
     def __post_init__(self) -> None:
         if (self.source is None) == (self.composite is None):
             raise ModelError(
                 f"измерение {self.name!r}: нужен ровно один источник — сущность или выражение"
             )
+        if self.max_age_seconds is not None and self.max_age_seconds <= 0:
+            raise ModelError(f"измерение {self.name!r}: максимальный возраст должен быть > 0")
 
     @property
     def kind(self) -> str:
@@ -246,6 +249,7 @@ class Measurement:
             "config_status": self.config_status.value,
             "source": self.source.to_dict() if self.source else None,
             "composite": self.composite.to_dict() if self.composite else None,
+            "max_age_seconds": self.max_age_seconds,
         }
 
 
@@ -645,6 +649,9 @@ class HomeModel:
                     config_status=ValidationStatus(measurement_payload.get("config_status", "unverified")),
                     source=SourceRef.from_dict(source_payload) if source_payload else None,
                     composite=composite,
+                    max_age_seconds=int(measurement_payload["max_age_seconds"])
+                    if measurement_payload.get("max_age_seconds") is not None
+                    else None,
                 )
             )
         for relationship_payload in payload.get("relationships", ()):

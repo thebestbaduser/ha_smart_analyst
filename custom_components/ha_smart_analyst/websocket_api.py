@@ -60,6 +60,8 @@ def _overview_payload(coordinator: SmartAnalystCoordinator) -> dict[str, Any]:
                         if measurement.id in observations
                         else Quality.UNCONFIGURED.value,
                         "entity_id": measurement.source.entity_id if measurement.source else None,
+                        "attribute": measurement.source.attribute if measurement.source else None,
+                        "max_age_seconds": measurement.max_age_seconds,
                     }
                     for measurement in coordinator.model.measurements_of(system.id)
                 ],
@@ -299,6 +301,7 @@ async def websocket_system_delete(hass: HomeAssistant, connection, msg) -> None:
         vol.Optional("unit"): vol.Any(str, None),
         vol.Optional("registry_entry_id"): vol.Any(str, None),
         vol.Optional("attribute"): vol.Any(str, None),
+        vol.Optional("max_age_seconds"): vol.Any(int, None),
     }
 )
 async def websocket_measurement_add(hass: HomeAssistant, connection, msg) -> None:
@@ -315,6 +318,7 @@ async def websocket_measurement_add(hass: HomeAssistant, connection, msg) -> Non
             unit=msg.get("unit"),
             registry_entry_id=msg.get("registry_entry_id"),
             attribute=msg.get("attribute"),
+            max_age_seconds=msg.get("max_age_seconds"),
         )
     except SmartAnalystError as err:
         _fail(connection, msg, err)

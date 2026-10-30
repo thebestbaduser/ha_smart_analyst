@@ -21,6 +21,7 @@ from .ai import (
     classify_status,
     parse_payload,
     retry_delay,
+    trim_package,
     validate_response,
 )
 from .composites import compute_composite
@@ -99,10 +100,14 @@ from .reports import (
     describe_schedule,
     history_facts,
     history_trend,
+    measurement_is_visible,
+    measurement_rank,
     next_run_at,
+    pair_facts,
     parse_schedule_times,
     phase_spread,
     render_report,
+    system_coverage,
 )
 from .rules import MissingDataPolicy, Rule, Severity, parse_rule, referenced_measurements
 from .storage import (
@@ -198,6 +203,8 @@ __all__ = [
     "digest",
     "history_facts",
     "history_trend",
+    "measurement_is_visible",
+    "measurement_rank",
     "evaluate",
     "evaluate_coverage",
     "evaluate_rule",
@@ -211,6 +218,7 @@ __all__ = [
     "next_run_at",
     "parse_payload",
     "parse_rule",
+    "pair_facts",
     "parse_schedule_times",
     "phase_spread",
     "referenced_measurements",
@@ -222,7 +230,9 @@ __all__ = [
     "suggest",
     "suggest_many",
     "summarize",
+    "system_coverage",
     "trend",
+    "trim_package",
     "validate_response",
     "validate_state",
 ]

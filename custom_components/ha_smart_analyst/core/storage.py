@@ -97,6 +97,8 @@ def migrate(payload: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any] 
             f"конфигурация версии {version} новее поддерживаемой {SCHEMA_VERSION}; "
             "обновите интеграцию"
         )
+    if "runtimes" in current and "runtime" not in current:
+        current["runtime"] = current.pop("runtimes")
     backup: dict[str, Any] | None = None
     while version < SCHEMA_VERSION:
         migration = _MIGRATIONS.get(version)
