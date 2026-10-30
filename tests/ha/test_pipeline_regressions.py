@@ -152,16 +152,17 @@ async def test_system_coverage_averages_sensors(hass: HomeAssistant, entry, monk
         Sample(now, 21.0, Quality.OK),
     ]
 
-    async def fake_load(cls, hass, window, sources):
+    async def fake_load(cls, hass, window, sources, timeout_seconds=None):
         return CachedHistory({first.id: good, second.id: poor})
 
     monkeypatch.setattr(CachedHistory, "async_load", classmethod(fake_load))
     profile = coordinator._profile(None)
 
-    sections = await coordinator._async_build_sections(
+    sections, history_note = await coordinator._async_build_sections(
         profile, coordinator.build_observations(now), window
     )
 
+    assert history_note is None
     assert len(sections) == 1
     assert sections[0].coverage == pytest.approx((0.95 + 0.2) / 2, abs=1e-6)
     assert sections[0].coverage != pytest.approx(0.95)
@@ -231,3 +232,55 @@ async def test_fast_rule_does_not_wait_for_slow_history(hass: HomeAssistant, ent
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
+
+async def test_fast_rule_survives_history_timeout(
+    hass: HomeAssistant, entry, monkeypatch
+) -> None:
+    hass.states.async_set("binary_sensor.leak", "on")
+    hass.states.async_set("sensor.temp", "20", {"unit_of_measurement": "°C"})
+    coordinator = await _setup(hass, entry)
+    system = await coordinator.async_create_system("Дом", "custom")
+    leak = await coordinator.async_add_measurement(
+        system_id=system.id, entity_id="binary_sensor.leak", role="leak"
+    )
+    temperature = await coordinator.async_add_measurement(
+        system_id=system.id, entity_id="sensor.temp", unit="°C"
+    )
+    await coordinator.async_save_rule(
+        {
+            "id": "rule_fast_timeout",
+            "name": "Протечка",
+            "severity": "critical",
+            "scope_id": system.id,
+            "expression": {"op": "state_is", "measurement_id": leak.id, "state": "on"},
+        }
+    )
+    await coordinator.async_save_rule(
+        {
+            "id": "rule_slow_timeout",
+            "name": "Резкий рост",
+            "severity": "warning",
+            "scope_id": system.id,
+            "expression": {
+                "op": "delta_above",
+                "measurement_id": temperature.id,
+                "window_seconds": 600,
+                "threshold": {"value": 5, "unit": "°C"},
+            },
+        }
+    )
+    coordinator.config_state.settings["history_timeout_seconds"] = 0.5
+
+    async def slow_load(cls, hass, window, sources, timeout_seconds=None):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(CachedHistory, "async_load", classmethod(slow_load))
+    started = asyncio.get_running_loop().time()
+    await coordinator._async_evaluate()
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed < 3
+    assert any(
+        incident.rule_id == "rule_fast_timeout"
+        for incident in coordinator.incidents.active()
+    )

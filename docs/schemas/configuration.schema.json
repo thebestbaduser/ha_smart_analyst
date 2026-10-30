@@ -30,7 +30,8 @@
         "timezone": { "type": "string" },
         "telegram_recipients": { "type": "array", "items": { "type": "string" } },
         "ai_enabled": { "type": "boolean" },
-        "incident_retention_days": { "type": "integer", "minimum": 1 }
+        "incident_retention_days": { "type": "integer", "minimum": 1 },
+        "history_timeout_seconds": { "type": "number", "minimum": 1 }
       }
     }
   },

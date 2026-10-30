@@ -88,6 +88,7 @@ export function profileDraft(values, existing = null) {
     max_optional: Number.isFinite(values.maxOptional) ? values.maxOptional : 8,
     group_by_system: values.groupBySystem !== false,
     show_states: values.showStates !== false,
+    compact_grouping: values.compactGrouping !== false,
   };
 }
 

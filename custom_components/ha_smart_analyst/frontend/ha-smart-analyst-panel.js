@@ -323,6 +323,7 @@ class HaSmartAnalystPanel extends HTMLElement {
       maxOptional: parseInt(root.querySelector("#profile-max-optional").value, 10),
       groupBySystem: root.querySelector("#profile-group").checked,
       showStates: root.querySelector("#profile-states").checked,
+      compactGrouping: root.querySelector("#profile-compact-group").checked,
     };
     const draft = profileDraft(values, this._editingProfile);
     try {
@@ -596,6 +597,7 @@ class HaSmartAnalystPanel extends HTMLElement {
           <label>Лимит дополнительных<input id="profile-max-optional" type="number" min="0" max="100" value="${this._escape(String(profile.max_optional ?? 8))}"></label>
           <label><input id="profile-group" type="checkbox"${profile.group_by_system === false ? "" : " checked"}> Группировать по системам</label>
           <label><input id="profile-states" type="checkbox"${profile.show_states === false ? "" : " checked"}> Показывать состояния и режимы</label>
+          <label><input id="profile-compact-group" type="checkbox"${profile.compact_grouping === false ? "" : " checked"}> Группировать строки компактного отчёта</label>
         </div>
         <div class="row">
           <button class="primary" data-action="submit-profile">Сохранить</button>

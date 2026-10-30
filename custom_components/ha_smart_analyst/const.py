@@ -8,7 +8,7 @@ from homeassistant.const import Platform
 
 DOMAIN: Final = "ha_smart_analyst"
 NAME: Final = "HA Smart Analyst"
-VERSION: Final = "0.3.2"
+VERSION: Final = "0.3.3"
 
 STORAGE_VERSION: Final = 1
 STORAGE_KEY: Final = DOMAIN
@@ -36,6 +36,7 @@ CONF_TELEGRAM_RECIPIENTS: Final = "telegram_recipients"
 CONF_QUIET_START: Final = "quiet_start"
 CONF_QUIET_END: Final = "quiet_end"
 CONF_INCIDENT_RETENTION_DAYS: Final = "incident_retention_days"
+CONF_HISTORY_TIMEOUT: Final = "history_timeout_seconds"
 CONF_REPORT_PROFILES: Final = "report_profiles"
 
 DEFAULT_AI_PROVIDER: Final = "deepseek"
@@ -43,6 +44,7 @@ DEFAULT_AI_BASE_URL: Final = "https://api.deepseek.com"
 DEFAULT_AI_MODEL: Final = "deepseek-flash"
 DEFAULT_LANGUAGE: Final = "ru"
 DEFAULT_INCIDENT_RETENTION_DAYS: Final = 90
+DEFAULT_HISTORY_TIMEOUT: Final = 5
 DEFAULT_QUIET_START: Final = "22:00:00"
 DEFAULT_QUIET_END: Final = "07:00:00"
 

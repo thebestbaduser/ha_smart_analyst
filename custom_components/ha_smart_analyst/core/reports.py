@@ -81,6 +81,7 @@ class ReportProfile:
     max_optional: int = 8
     group_by_system: bool = True
     show_states: bool = True
+    compact_grouping: bool = True
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -103,6 +104,7 @@ class ReportProfile:
             "max_optional": self.max_optional,
             "group_by_system": self.group_by_system,
             "show_states": self.show_states,
+            "compact_grouping": self.compact_grouping,
         }
 
     @classmethod
@@ -146,6 +148,7 @@ class ReportProfile:
             max_optional=int(payload.get("max_optional", 8)),
             group_by_system=bool(payload.get("group_by_system", True)),
             show_states=bool(payload.get("show_states", True)),
+            compact_grouping=bool(payload.get("compact_grouping", True)),
         )
 
 
@@ -286,6 +289,80 @@ _ROLE_PRIORITY = {
     MeasurementRole.OCCUPANCY: 14,
     MeasurementRole.CUSTOM: 15,
 }
+
+
+_COMPACT_ICONS = {
+    "electricity": "⚡",
+    "energy": "🪙",
+    "heating": "🔥",
+    "dhw": "💧",
+    "floor_heating": "♨️",
+    "radiators": "🔆",
+    "climate": "🌡️",
+    "water": "🚰",
+    "ventilation": "🌬️",
+    "security": "🛡️",
+    "lighting": "💡",
+}
+
+
+def _compact_icon(fact: MeasurementFact) -> str:
+    if fact.role is MeasurementRole.VOLTAGE_PHASE:
+        return "⚡"
+    if fact.role is MeasurementRole.ENERGY:
+        return "🪙"
+    if fact.role in {
+        MeasurementRole.TEMPERATURE_INDOOR,
+        MeasurementRole.TEMPERATURE_OUTDOOR,
+    }:
+        return "🌡️"
+    return _COMPACT_ICONS.get(fact.system_preset or "", "•")
+
+
+def _compact_family(fact: MeasurementFact) -> str:
+    numeric = isinstance(fact.value, (int, float)) and not isinstance(fact.value, bool)
+    if (
+        fact.equipment_name
+        and numeric
+        and fact.role in {MeasurementRole.ACTUAL, MeasurementRole.SETPOINT}
+    ):
+        return f"equipment:{fact.equipment_name}"
+    if fact.role is MeasurementRole.VOLTAGE_PHASE:
+        return "voltage"
+    if fact.role is MeasurementRole.ENERGY:
+        return "energy"
+    if fact.role is MeasurementRole.CUSTOM and fact.system_preset == "electricity":
+        return "energy"
+    if fact.role in {
+        MeasurementRole.TEMPERATURE_INDOOR,
+        MeasurementRole.TEMPERATURE_OUTDOOR,
+    }:
+        return "temperature"
+    return f"single:{fact.id}"
+
+
+def compact_groups(
+    systems: Sequence[SystemSection], profile: ReportProfile
+) -> list[tuple[str, tuple[MeasurementFact, ...]]]:
+    """Строки компактного отчёта: связанные показатели собираются вместе.
+
+    Пары «факт/уставка» одного оборудования, фазы, энергия и температуры
+    выводятся одной строкой; лимит и порядок уже применены выбором показаний.
+    """
+    selected = compact_measurements(systems, profile)
+    if not profile.compact_grouping:
+        return [(_compact_icon(fact), (fact,)) for _system, fact in selected]
+    order: list[str] = []
+    buckets: dict[str, list[MeasurementFact]] = {}
+    icons: dict[str, str] = {}
+    for system_name, fact in selected:
+        key = f"{system_name}|{_compact_family(fact)}"
+        if key not in buckets:
+            order.append(key)
+            buckets[key] = []
+            icons[key] = _compact_icon(fact)
+        buckets[key].append(fact)
+    return [(icons[key], tuple(buckets[key])) for key in order]
 
 
 def compact_omitted(systems: Sequence[SystemSection], profile: ReportProfile) -> int:
@@ -668,25 +745,51 @@ def _fallback_lines(
     ]
 
 
+def _compact_quality(fact: MeasurementFact, locale: Locale) -> str:
+    if fact.quality is Quality.OK:
+        return ""
+    labels = _QUALITY_RU if locale is Locale.RU else _QUALITY_EN
+    return f" [{labels[fact.quality]}]"
+
+
+def _render_compact_group(
+    icon: str, facts: tuple[MeasurementFact, ...], locale: Locale
+) -> str:
+    """Одна короткая строка: пара оборудования, фазы, энергия или одиночное значение."""
+    units = {fact.unit for fact in facts if fact.unit}
+    single_unit = next(iter(units)) if len(units) == 1 else None
+    equipment = facts[0].equipment_name if len(facts) > 1 else None
+    if equipment:
+        values = " / ".join(
+            _format_value(fact.value, None if single_unit else fact.unit, locale)
+            + _compact_quality(fact, locale)
+            for fact in facts
+        )
+        suffix = f" {single_unit}" if single_unit else ""
+        return f"{icon} {equipment} {values}{suffix}"
+    if len(facts) == 1:
+        fact = facts[0]
+        rendered = _format_value(fact.value, fact.unit, locale)
+        return f"{icon} {fact.name} — {rendered}{_compact_quality(fact, locale)}"
+    parts = []
+    for fact in facts:
+        rendered = _format_value(fact.value, None if single_unit else fact.unit, locale)
+        parts.append(f"{fact.name} {rendered}{_compact_quality(fact, locale)}")
+    suffix = f" {single_unit}" if single_unit else ""
+    return f"{icon} " + " · ".join(parts) + suffix
+
+
 def _compact_lines(package: AnalysisPackage, profile: ReportProfile) -> list[str]:
     """Короткая сводка с ключевыми цифрами — показывается всегда (REP-04)."""
     locale = profile.locale
-    selected = compact_measurements(package.systems, profile)
+    groups = compact_groups(package.systems, profile)
     if locale is Locale.RU:
         lines = ["", "**Ключевые показатели**"]
-        if not selected:
+        if not groups:
             lines.append("• Числовых показаний нет — проверьте, что датчики добавлены и доступны.")
             return lines
-        for system_name, measurement in selected:
-            quality = (
-                ""
-                if measurement.quality is Quality.OK
-                else f" [{_QUALITY_RU[measurement.quality]}]"
-            )
-            lines.append(
-                f"• {system_name}: {measurement.name} — "
-                f"{_format_value(measurement.value, measurement.unit, locale)}{quality}"
-            )
+        for icon, facts in groups:
+            lines.append(_render_compact_group(icon, facts, locale))
         omitted = compact_omitted(package.systems, profile)
         if omitted:
             lines.append(
@@ -695,17 +798,11 @@ def _compact_lines(package: AnalysisPackage, profile: ReportProfile) -> list[str
             )
         return lines
     lines = ["", "**Key readings**"]
-    if not selected:
+    if not groups:
         lines.append("• No numeric readings — check that sensors are added and available.")
         return lines
-    for system_name, measurement in selected:
-        quality = (
-            "" if measurement.quality is Quality.OK else f" [{_QUALITY_EN[measurement.quality]}]"
-        )
-        lines.append(
-            f"• {system_name}: {measurement.name} — "
-            f"{_format_value(measurement.value, measurement.unit, locale)}{quality}"
-        )
+    for icon, facts in groups:
+        lines.append(_render_compact_group(icon, facts, locale))
     omitted = compact_omitted(package.systems, profile)
     if omitted:
         lines.append(
@@ -753,6 +850,7 @@ def render_report(
     local_severity: Severity = Severity.INFO,
     detail: DetailLevel | None = None,
     ai_error: str | None = None,
+    history_note: str | None = None,
 ) -> RenderedReport:
     """Собрать текст отчёта: факты локально, ИИ — отдельным блоком."""
     data_quality_issue = any(
@@ -775,6 +873,11 @@ def render_report(
             lines.extend(_system_lines(system, locale, chosen))
 
     lines.extend(_incident_lines(incidents, locale))
+
+    if history_note:
+        lines.append("")
+        prefix = "⚠️ История: " if locale is Locale.RU else "⚠️ History: "
+        lines.append(prefix + history_note)
 
     attention = local_severity
     if response is not None:

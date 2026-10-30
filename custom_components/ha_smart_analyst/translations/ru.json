@@ -57,7 +57,8 @@
           "telegram_recipients": "Получатели (необязательно)",
           "quiet_start": "Начало тихих часов",
           "quiet_end": "Конец тихих часов",
-          "incident_retention_days": "Хранение инцидентов, дней"
+          "incident_retention_days": "Хранение инцидентов, дней",
+          "history_timeout_seconds": "Ожидание истории, секунд"
         },
         "data_description": {
           "telegram_service": "Например notify.telegram_bot_123_456. Оставьте пустым — будут уведомления внутри HA.",

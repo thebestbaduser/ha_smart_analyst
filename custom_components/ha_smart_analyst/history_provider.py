@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from collections.abc import Mapping, Sequence
@@ -112,12 +113,29 @@ class CachedHistory:
 
     @classmethod
     async def async_load(
-        cls, hass: HomeAssistant, window: Window, sources: Mapping[str, HistorySource]
+        cls,
+        hass: HomeAssistant,
+        window: Window,
+        sources: Mapping[str, HistorySource],
+        timeout_seconds: float | None = None,
     ) -> CachedHistory:
-        """Прочитать историю всех нужных измерений одним заходом в executor."""
+        """Прочитать историю всех нужных измерений одним заходом в executor.
+
+        ``timeout_seconds`` ограничивает и ожидание Recorder, и чтение: отчёт
+        не должен зависать из-за базы. По таймауту поднимается ``TimeoutError``,
+        вызывающая сторона решает, показывать отчёт без истории или нет.
+        """
         if not sources:
             return cls({})
-        recorder = get_instance(hass)
-        await recorder.async_wait_recorder()
-        raw = await hass.async_add_executor_job(_read_states, hass, window, sources)
+
+        async def read() -> dict[str, list[Sample]]:
+            recorder = get_instance(hass)
+            await recorder.async_wait_recorder()
+            return await hass.async_add_executor_job(_read_states, hass, window, sources)
+
+        if timeout_seconds is None:
+            raw = await read()
+        else:
+            async with asyncio.timeout(timeout_seconds):
+                raw = await read()
         return cls(raw)

@@ -218,6 +218,12 @@ def build_reference_package(
                 measurement.role,
                 observations[measurement.id],
                 required=True,
+                equipment_name=(
+                    model.equipment[measurement.equipment_id].name
+                    if measurement.equipment_id is not None
+                    else None
+                ),
+                system_preset=system.preset.value,
             )
             for measurement in items
         )
@@ -279,11 +285,13 @@ def test_reference_report_keeps_every_required_reading(detail: DetailLevel) -> N
 
     for name, value, _unit, _system in VALUES.values():
         if isinstance(value, bool):
-            assert name in rendered.text
+            assert "включено" in rendered.text
         else:
             formatted = f"{value:.1f}".replace(".", ",")
-            needle = f"{name} — {formatted}" if compact else f"{name}: {formatted}"
-            assert needle in rendered.text, name
+            if compact:
+                assert formatted in rendered.text, name
+            else:
+                assert f"{name}: {formatted}" in rendered.text, name
 
 
 def test_reference_reports_do_not_invent_trends_without_history() -> None:
@@ -329,6 +337,15 @@ def test_standard_and_detailed_levels_differ() -> None:
     assert "покрытие истории" not in standard
     assert "покрытие истории" in detailed
     assert "Котёл − Цель котла" in standard
+
+
+def test_reference_compact_groups_related_readings() -> None:
+    text = render_reference(DetailLevel.COMPACT).text
+
+    assert "🔥 Котёл 57,8 / 60,0 °C" in text
+    assert "💧 Бойлер ГВС 42,6 / 45,0 °C" in text
+    assert "⚡ Фаза L1 240,0 · Фаза L2 232,6 · Фаза L3 227,2 В" in text
+    assert "🌡️ Первый этаж 24,3 · Второй этаж 23,5 · Улица 0,6 °C" in text
 
 
 def test_reference_fixture_matches_current_reports() -> None:

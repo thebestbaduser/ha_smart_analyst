@@ -49,6 +49,7 @@ test("профиль при повторном сохранении сохран
   assert.equal(again.max_optional, 8);
   assert.equal(again.group_by_system, true);
   assert.equal(again.show_states, true);
+  assert.equal(again.compact_grouping, true);
 });
 
 test("профиль переносит обязательные показатели и расписание", () => {
@@ -60,6 +61,7 @@ test("профиль переносит обязательные показат�
     optional: ["m3"],
     maxOptional: 3,
     groupBySystem: false,
+    compactGrouping: false,
     showStates: false,
   });
   assert.equal(draft.report_type, "scheduled");
@@ -68,6 +70,7 @@ test("профиль переносит обязательные показат�
   assert.equal(draft.max_optional, 3);
   assert.equal(draft.group_by_system, false);
   assert.equal(draft.show_states, false);
+  assert.equal(draft.compact_grouping, false);
 });
 
 test("расписание разбирается без пустых слотов", () => {

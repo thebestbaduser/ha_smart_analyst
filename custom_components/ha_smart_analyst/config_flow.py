@@ -34,6 +34,7 @@ from .const import (
     CONF_AI_ENABLED,
     CONF_AI_MODEL,
     CONF_AI_PROVIDER,
+    CONF_HISTORY_TIMEOUT,
     CONF_INCIDENT_RETENTION_DAYS,
     CONF_INSTANCE_NAME,
     CONF_LANGUAGE,
@@ -45,6 +46,7 @@ from .const import (
     DEFAULT_AI_BASE_URL,
     DEFAULT_AI_MODEL,
     DEFAULT_AI_PROVIDER,
+    DEFAULT_HISTORY_TIMEOUT,
     DEFAULT_INCIDENT_RETENTION_DAYS,
     DEFAULT_LANGUAGE,
     DEFAULT_QUIET_END,
@@ -229,6 +231,10 @@ class SmartAnalystOptionsFlow(config_entries.OptionsFlow):
                         CONF_INCIDENT_RETENTION_DAYS,
                         default=int(current.get(CONF_INCIDENT_RETENTION_DAYS, DEFAULT_INCIDENT_RETENTION_DAYS)),
                     ): NumberSelector(NumberSelectorConfig(min=30, max=365, step=30, mode="box")),
+                    vol.Optional(
+                        CONF_HISTORY_TIMEOUT,
+                        default=int(current.get(CONF_HISTORY_TIMEOUT, DEFAULT_HISTORY_TIMEOUT)),
+                    ): NumberSelector(NumberSelectorConfig(min=1, max=60, step=1, mode="box")),
                 }
             ),
         )

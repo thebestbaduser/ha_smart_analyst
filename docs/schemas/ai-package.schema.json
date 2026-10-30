@@ -71,7 +71,9 @@
                   "enum": ["ok", "stale", "unknown", "unavailable", "invalid", "unconfigured", "history_missing"]
                 },
                 "required": { "type": "boolean" },
-                "coverage": { "type": "number", "minimum": 0, "maximum": 1 }
+                "coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+                "equipment_name": { "type": ["string", "null"] },
+                "system_preset": { "type": ["string", "null"] }
               }
             }
           },

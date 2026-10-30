@@ -98,9 +98,11 @@ class MeasurementFact:
     quality: Quality
     required: bool = False
     coverage: float | None = None
+    equipment_name: str | None = None
+    system_preset: str | None = None
 
     @classmethod
-    def from_observation(cls, measurement_id: str, name: str, role: MeasurementRole, observation: Observation, *, required: bool = False, coverage: float | None = None) -> MeasurementFact:
+    def from_observation(cls, measurement_id: str, name: str, role: MeasurementRole, observation: Observation, *, required: bool = False, coverage: float | None = None, equipment_name: str | None = None, system_preset: str | None = None) -> MeasurementFact:
         return cls(
             id=measurement_id,
             name=name,
@@ -110,6 +112,8 @@ class MeasurementFact:
             quality=observation.quality,
             required=required,
             coverage=coverage,
+            equipment_name=equipment_name,
+            system_preset=system_preset,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -125,6 +129,10 @@ class MeasurementFact:
             payload["required"] = True
         if self.coverage is not None:
             payload["coverage"] = round(self.coverage, 3)
+        if self.equipment_name:
+            payload["equipment_name"] = self.equipment_name
+        if self.system_preset:
+            payload["system_preset"] = self.system_preset
         return payload
 
 

@@ -21,6 +21,7 @@ from core.observations import Quality, ValueType, build_observation
 from core.reports import (
     DetailLevel,
     ReportProfile,
+    compact_groups,
     compact_measurements,
     history_facts,
     render_report,
@@ -245,3 +246,40 @@ def test_compact_report_marks_hidden_optional_readings() -> None:
     rendered = render_report(profile, package, NOW)
 
     assert "Не показано из-за лимита: 2" in rendered.text
+
+def test_compact_groups_pair_equipment_and_can_be_disabled() -> None:
+    actual = MeasurementFact(
+        id="actual",
+        name="Котёл",
+        role=MeasurementRole.ACTUAL,
+        value=57.8,
+        unit="°C",
+        quality=Quality.OK,
+        required=True,
+        equipment_name="Котёл",
+        system_preset="heating",
+    )
+    setpoint = MeasurementFact(
+        id="setpoint",
+        name="Цель котла",
+        role=MeasurementRole.SETPOINT,
+        value=60.0,
+        unit="°C",
+        quality=Quality.OK,
+        required=True,
+        equipment_name="Котёл",
+        system_preset="heating",
+    )
+    section = SystemSection(
+        id="s", name="Отопление", measurements=(actual, setpoint)
+    )
+
+    grouped = compact_groups([section], ReportProfile(id="p", name="Отчёт"))
+    single = compact_groups(
+        [section], ReportProfile(id="p", name="Отчёт", compact_grouping=False)
+    )
+
+    assert len(grouped) == 1
+    assert grouped[0][0] == "🔥"
+    assert len(grouped[0][1]) == 2
+    assert len(single) == 2

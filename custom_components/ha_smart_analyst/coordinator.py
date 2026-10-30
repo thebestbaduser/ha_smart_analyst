@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from .const import (
     ASSESS_INTERVAL_SECONDS,
     CONF_AI_ENABLED,
     CONF_AI_MODEL,
+    CONF_HISTORY_TIMEOUT,
     CONF_INCIDENT_RETENTION_DAYS,
     CONF_LANGUAGE,
     CONF_QUIET_END,
@@ -35,6 +37,7 @@ from .const import (
     CONF_TELEGRAM_SERVICE,
     DEFAULT_AI_BASE_URL,
     DEFAULT_AI_MODEL,
+    DEFAULT_HISTORY_TIMEOUT,
     DOMAIN,
     EVENT_DATA_QUALITY,
     EVENT_INCIDENT_OPENED,
@@ -164,8 +167,8 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         self._tokens_used = 0
         self.last_delivery: dict[str, Any] | None = None
         self._report_next: dict[str, datetime] = {}
-        self._reports_in_flight: dict[str, asyncio.Task[RenderedReport]] = {}
-        self._report_cache: dict[str, tuple[datetime, RenderedReport]] = {}
+        self._reports_in_flight: dict[tuple[str, bool, str], asyncio.Task[RenderedReport]] = {}
+        self._report_cache: dict[tuple[str, bool, str], tuple[datetime, RenderedReport]] = {}
 
     # -- жизненный цикл -----------------------------------------------
     async def async_initialize(self) -> None:
@@ -293,6 +296,16 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         settings["incident_retention_days"] = int(
             merged.get(CONF_INCIDENT_RETENTION_DAYS, settings.get("incident_retention_days", 90))
         )
+        try:
+            timeout = float(
+                merged.get(
+                    CONF_HISTORY_TIMEOUT,
+                    settings.get("history_timeout_seconds", DEFAULT_HISTORY_TIMEOUT),
+                )
+            )
+        except (TypeError, ValueError):
+            timeout = DEFAULT_HISTORY_TIMEOUT
+        settings["history_timeout_seconds"] = timeout
 
     def _quiet_hours(self) -> QuietHours | None:
         raw = self.config_state.settings.get("quiet_hours") or {}
@@ -487,6 +500,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                 break
         else:
             self.config_state.report_profiles.append(stored)
+        self._invalidate_report_cache(profile.id)
         self._refresh_report_schedule()
         self._schedule_save()
         return profile
@@ -499,6 +513,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         if len(self.config_state.report_profiles) == before:
             raise SmartAnalystError(f"профиль {profile_id!r} не найден")
         self._report_next.pop(profile_id, None)
+        self._invalidate_report_cache(profile_id)
         self._schedule_save()
 
     # -- оценка -------------------------------------------------------
@@ -583,13 +598,33 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
             if measurement.source is not None
         }
 
+    def _history_timeout(self) -> float:
+        try:
+            value = float(
+                self.config_state.settings.get(
+                    "history_timeout_seconds", DEFAULT_HISTORY_TIMEOUT
+                )
+            )
+        except (TypeError, ValueError):
+            value = DEFAULT_HISTORY_TIMEOUT
+        return max(0.5, value)
+
     async def _async_load_history(self, now: datetime) -> CachedHistory | None:
         sources = self._history_sources()
         if not sources:
             return None
         window = Window.last(now, self._history_window())
+        timeout = self._history_timeout()
         try:
-            return await CachedHistory.async_load(self.hass, window, sources)
+            async with asyncio.timeout(timeout):
+                return await CachedHistory.async_load(
+                    self.hass, window, sources, timeout
+                )
+        except TimeoutError:
+            _LOGGER.warning(
+                "История не загружена за %s с — правила с историей пропущены", timeout
+            )
+            return None
         except Exception as err:  # noqa: BLE001 - Recorder не должен ронять интеграцию
             _LOGGER.debug("История недоступна: %s", err)
             return None
@@ -900,34 +935,72 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         10 секунд после готовности возвращается тот же отчёт без новой отправки.
         """
         profile = self._profile(profile_id)
-        cached = self._report_cache.get(profile.id)
+        effective_ai = self._effective_ai(use_ai)
+        key = self._report_cache_key(profile, effective_ai)
+        cached = self._report_cache.get(key)
         if (
             cached is not None
             and (dt_util.utcnow() - cached[0]).total_seconds() < REPORT_DEDUPE_SECONDS
         ):
             return cached[1]
-        existing = self._reports_in_flight.get(profile.id)
+        existing = self._reports_in_flight.get(key)
         if existing is not None and not existing.done():
             return await asyncio.shield(existing)
         task = self.hass.async_create_task(
-            self._async_generate_report(profile, use_ai)
+            self._async_generate_report(profile, effective_ai)
         )
-        self._reports_in_flight[profile.id] = task
+        self._reports_in_flight[key] = task
         try:
             rendered = await asyncio.shield(task)
         finally:
-            if self._reports_in_flight.get(profile.id) is task:
-                self._reports_in_flight.pop(profile.id, None)
-        self._report_cache[profile.id] = (dt_util.utcnow(), rendered)
+            if self._reports_in_flight.get(key) is task:
+                self._reports_in_flight.pop(key, None)
+        self._report_cache[key] = (dt_util.utcnow(), rendered)
         return rendered
 
+    def _effective_ai(self, use_ai: bool | None) -> bool:
+        """Режим ИИ, который реально определит содержимое отчёта."""
+        if use_ai is not None:
+            return bool(use_ai)
+        return bool(self.config_state.settings.get("ai_enabled", True))
+
+    def _report_cache_key(
+        self, profile: ReportProfile, use_ai: bool
+    ) -> tuple[str, bool, str]:
+        """Ключ кэша: профиль, режим ИИ и ревизия влияющих настроек."""
+        ai: dict[str, str | None] = {"model": None, "base_url": None, "key": None}
+        if use_ai:
+            config = self._ai_config()
+            if config is not None:
+                ai = {
+                    "model": config.model,
+                    "base_url": config.base_url,
+                    "key": hashlib.sha256(config.api_key.encode("utf-8")).hexdigest()[:16],
+                }
+        payload = json.dumps(
+            {"profile": profile.to_dict(), "ai": ai},
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        return (
+            profile.id,
+            use_ai,
+            hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+        )
+
+    def _invalidate_report_cache(self, profile_id: str) -> None:
+        for key in [key for key in self._report_cache if key[0] == profile_id]:
+            self._report_cache.pop(key, None)
+
     async def _async_generate_report(
-        self, profile: ReportProfile, use_ai: bool | None
+        self, profile: ReportProfile, use_ai: bool
     ) -> RenderedReport:
         now = dt_util.utcnow()
         observations = self.build_observations(now)
         window = Window.last(now, profile.history_seconds)
-        sections = await self._async_build_sections(profile, observations, window)
+        sections, history_note = await self._async_build_sections(
+            profile, observations, window
+        )
         if not sections:
             raise SmartAnalystError(
                 "в отчёте нет ни одного показания: добавьте систему и датчики "
@@ -957,13 +1030,10 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                 for incident in self.incidents.active()
             ],
         )
-        ai_enabled = (
-            self.config_state.settings.get("ai_enabled", True) if use_ai is None else use_ai
-        )
         response: AIResponse | None = None
-        if ai_enabled:
+        if use_ai:
             response = await self._async_analyze(package)
-        ai_error = None if response is not None or not ai_enabled else self._ai_error
+        ai_error = None if response is not None or not use_ai else self._ai_error
         local_severity = _max_severity(incident_digests)
         rendered = render_report(
             profile,
@@ -973,6 +1043,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
             response=response,
             local_severity=local_severity,
             ai_error=ai_error,
+            history_note=history_note,
         )
         recipients = list(profile.recipients or self.notification_targets())
         for recipient in recipients:
@@ -1066,13 +1137,32 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         profile: ReportProfile,
         observations: dict[str, Observation],
         window: Window,
-    ) -> tuple[SystemSection, ...]:
-        """Собрать разделы отчёта с историей, уставками и привязкой к оборудованию."""
+    ) -> tuple[tuple[SystemSection, ...], str | None]:
+        """Собрать разделы отчёта с историей, уставками и привязкой к оборудованию.
+
+        Возвращает разделы и пометку, если история не успела загрузиться.
+        """
         sources = self._history_sources()
         history: CachedHistory | None = None
+        history_note: str | None = None
+        timeout = self._history_timeout()
         if sources:
             try:
-                history = await CachedHistory.async_load(self.hass, window, sources)
+                async with asyncio.timeout(timeout):
+                    history = await CachedHistory.async_load(
+                        self.hass, window, sources, timeout
+                    )
+            except TimeoutError:
+                _LOGGER.warning(
+                    "История для отчёта не загружена за %s с — показания без истории",
+                    timeout,
+                )
+                history_note = (
+                    f"история не загружена за {timeout:g} с — отчёт по текущим показаниям"
+                    if profile.locale is Locale.RU
+                    else f"history was not loaded within {timeout:g}s; "
+                    "the report uses current readings"
+                )
             except Exception as err:  # noqa: BLE001 - без истории отчёт остаётся честным
                 _LOGGER.debug("История для отчёта недоступна: %s", err)
 
@@ -1090,7 +1180,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                 for measurement in self.model.measurements_of(system.id)
             )
 
-        groups: list[tuple[str, str, list[Measurement]]] = []
+        groups: list[tuple[str, str, list[Measurement], str]] = []
         for system in self.model.systems.values():
             if not included_system(system):
                 continue
@@ -1101,15 +1191,15 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
             ]
             if not items:
                 continue
-            groups.append((system.id, system.name, items))
+            groups.append((system.id, system.name, items, system.preset.value))
             present.update(measurement.id for measurement in items)
 
         if not profile.group_by_system:
-            merged = [measurement for _, _, items in groups for measurement in items]
+            merged = [measurement for _, _, items, _ in groups for measurement in items]
             site_name = (
                 self.model.site.name if self.model.site is not None else "Все показатели"
             )
-            groups = [("all", site_name, merged)] if merged else []
+            groups = [("all", site_name, merged, "")] if merged else []
 
         missing = [
             measurement_id
@@ -1118,7 +1208,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         ]
 
         sections: list[SystemSection] = []
-        for system_id, system_name, items in groups:
+        for system_id, system_name, items, preset in groups:
             sections.append(
                 self._build_section(
                     profile,
@@ -1129,6 +1219,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                     history,
                     window,
                     required,
+                    preset,
                 )
             )
         if missing:
@@ -1143,7 +1234,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                     measurements=missing_facts,
                 )
             )
-        return tuple(sections)
+        return tuple(sections), history_note
 
     def _build_section(
         self,
@@ -1155,6 +1246,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         history: CachedHistory | None,
         window: Window,
         required: set[str],
+        system_preset: str,
     ) -> SystemSection:
         facts: list[Fact] = list(pair_facts(items, observations))
         coverages: list[float] = []
@@ -1194,6 +1286,13 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                 observations[measurement.id],
                 required=measurement.id in required,
                 coverage=coverage_by_measurement.get(measurement.id),
+                equipment_name=(
+                    self.model.equipment[measurement.equipment_id].name
+                    if measurement.equipment_id
+                    and measurement.equipment_id in self.model.equipment
+                    else None
+                ),
+                system_preset=system_preset or None,
             )
             for measurement in items
         ]
