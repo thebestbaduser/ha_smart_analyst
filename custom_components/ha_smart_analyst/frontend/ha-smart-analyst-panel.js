@@ -1,11 +1,15 @@
-import {
+const MODULE_URL = new URL(import.meta.url);
+const MODULE_VERSION = MODULE_URL.searchParams.get("v") || "dev";
+const HELPER_URL = new URL("./panel-helpers.js", MODULE_URL);
+HELPER_URL.search = MODULE_URL.search;
+const {
   errorMessage,
   parseSchedule,
   profileDraft,
   readMultiSelect,
   reportMessage,
   servicePayload,
-} from "./panel-helpers.js";
+} = await import(HELPER_URL.href);
 
 const ROLES = [
   ["custom", "custom"],
@@ -57,7 +61,7 @@ const SEVERITIES = [
   ["info", "информация"],
 ];
 
-class HaSmartAnalystPanel extends HTMLElement {
+export class HaSmartAnalystPanel extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
@@ -378,9 +382,13 @@ class HaSmartAnalystPanel extends HTMLElement {
       );
       const message = reportMessage(response);
       if (!message) {
+        const backend = (this._data && this._data.version) || "?";
         this._fail(
-          "Сервис не вернул текст отчёта. Проверьте «Журнал» Home Assistant: " +
-            "возможно, в профиле нет доступных датчиков."
+          "Сервис не вернул текст отчёта (этап: ответ service; frontend " +
+            MODULE_VERSION +
+            ", backend " +
+            backend +
+            "). Проверьте «Журнал» Home Assistant: возможно, в профиле нет доступных датчиков."
         );
         return;
       }
@@ -471,6 +479,16 @@ class HaSmartAnalystPanel extends HTMLElement {
     ];
   }
 
+  _versionWarning(data) {
+    if (!data || !data.version) {
+      return "";
+    }
+    if (String(data.version) === MODULE_VERSION) {
+      return "";
+    }
+    return `<p class="error" role="alert">Frontend v${this._escape(MODULE_VERSION)} не совпадает с backend v${this._escape(data.version)} — обновите страницу (Ctrl+Shift+R) или перезапустите Home Assistant.</p>`;
+  }
+
   _render() {
     const data = this._data;
     const tabs = this._tabs()
@@ -526,8 +544,11 @@ class HaSmartAnalystPanel extends HTMLElement {
         @media (max-width: 600px) { :host { padding: 8px; } th, td { padding: 4px; } }
       </style>
       <h1>HA Smart Analyst${
-        data && data.version ? ` <span class="muted">v${this._escape(data.version)}</span>` : ""
+        data && data.version
+          ? ` <span class="muted">v${this._escape(data.version)} · frontend ${this._escape(MODULE_VERSION)}</span>`
+          : ` <span class="muted">frontend ${this._escape(MODULE_VERSION)}</span>`
       }</h1>
+      ${this._versionWarning(data)}
       <div class="tabs" role="tablist">${tabs}</div>
       ${flash}
       <div role="tabpanel">${body}</div>

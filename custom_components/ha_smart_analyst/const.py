@@ -8,7 +8,7 @@ from homeassistant.const import Platform
 
 DOMAIN: Final = "ha_smart_analyst"
 NAME: Final = "HA Smart Analyst"
-VERSION: Final = "0.3.4"
+VERSION: Final = "0.3.5"
 
 STORAGE_VERSION: Final = 1
 STORAGE_KEY: Final = DOMAIN
@@ -49,7 +49,7 @@ DEFAULT_QUIET_START: Final = "22:00:00"
 DEFAULT_QUIET_END: Final = "07:00:00"
 
 PANEL_URL: Final = "ha-smart-analyst"
-PANEL_MODULE: Final = "/ha_smart_analyst_static/ha-smart-analyst-panel.js"
+PANEL_MODULE: Final = f"/ha_smart_analyst_static/ha-smart-analyst-panel.js?v={VERSION}"
 PANEL_ICON: Final = "mdi:home-analytics"
 
 SERVICE_GENERATE_REPORT: Final = "generate_report"

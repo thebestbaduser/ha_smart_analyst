@@ -13,6 +13,7 @@ from custom_components.ha_smart_analyst.const import (
     CONF_AI_ENABLED,
     CONF_INSTANCE_NAME,
     DOMAIN,
+    PANEL_MODULE,
     SERVICE_ACKNOWLEDGE_INCIDENT,
     SERVICE_EXPORT_CONFIGURATION,
     SERVICE_GENERATE_REPORT,
@@ -93,3 +94,8 @@ async def test_refresh_analysis_runs(hass: HomeAssistant, entry: MockConfigEntry
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     await hass.services.async_call(DOMAIN, SERVICE_REFRESH_ANALYSIS, {}, blocking=True)
+
+def test_panel_module_url_is_versioned() -> None:
+    from custom_components.ha_smart_analyst.const import VERSION
+
+    assert PANEL_MODULE.endswith(f"/ha-smart-analyst-panel.js?v={VERSION}")

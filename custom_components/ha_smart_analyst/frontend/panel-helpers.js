@@ -31,7 +31,8 @@ export function servicePayload(response) {
 export function reportMessage(response) {
   const payload = servicePayload(response);
   const text = typeof payload.text === "string" ? payload.text.trim() : "";
-  if (!text) {
+  const placeholders = ["undefined", "null", "[object object]"];
+  if (!text || placeholders.includes(text.toLowerCase())) {
     return null;
   }
   return {

@@ -29,6 +29,8 @@ test("пустой ответ не превращается в undefined", () =>
   assert.equal(reportMessage({}), null);
   assert.equal(reportMessage(null), null);
   assert.equal(reportMessage({ text: "   " }), null);
+  assert.equal(reportMessage({ text: "undefined" }), null);
+  assert.equal(reportMessage({ text: "null" }), null);
   assert.equal(servicePayload(42).text, undefined);
 });
 
