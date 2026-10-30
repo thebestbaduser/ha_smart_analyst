@@ -352,6 +352,21 @@ class HaSmartAnalystPanel extends HTMLElement {
     }
   }
 
+  async _testNotify() {
+    const targets = (this._data.telegram.targets || ["persistent"]).slice();
+    try {
+      for (const target of targets) {
+        await this.hass.callService("ha_smart_analyst", "test_notification", {
+          recipient: target,
+          message: "Проверка уведомлений HA Smart Analyst",
+        });
+      }
+      this._ok(`Проверочное сообщение отправлено: ${targets.join(", ")}`);
+    } catch (err) {
+      this._fail(err);
+    }
+  }
+
   _findMeasurement(measurementId) {
     if (!this._data) {
       return null;
@@ -594,9 +609,11 @@ class HaSmartAnalystPanel extends HTMLElement {
         </div>`;
       case "telegram":
         return `<div class="grid">
-          <div class="card"><div class="muted">Служба notify</div><div class="value">${this._escape(data.telegram.service || "—")}</div></div>
-          <div class="card"><div class="muted">Получатели</div><div>${this._escape((data.telegram.recipients || []).join(", ") || "—")}</div></div>
-        </div>`;
+          <div class="card"><div class="muted">Notify-сущность</div><div class="value">${this._escape(data.telegram.service || "—")}</div></div>
+          <div class="card"><div class="muted">Куда доставлять</div><div>${this._escape((data.telegram.targets || []).join(", ") || "—")}</div></div>
+        </div>
+        <p class="muted">Если выбрана notify-сущность Telegram, chat_id не нужен. Если ничего не выбрано — уведомления остаются внутри Home Assistant.</p>
+        <div class="row"><button class="primary" data-action="test-notify">Отправить проверочное сообщение</button></div>`;
       case "history":
         return `<p>${data.history.available ? "Recorder доступен." : "История недоступна — отчёты не будут утверждать тренды."}</p>`;
       case "diagnostics":
@@ -816,6 +833,9 @@ class HaSmartAnalystPanel extends HTMLElement {
         break;
       case "ack":
         this._acknowledge(dataset.incident);
+        break;
+      case "test-notify":
+        this._testNotify();
         break;
       default:
         break;

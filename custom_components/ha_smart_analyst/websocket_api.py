@@ -129,6 +129,7 @@ def _overview_payload(coordinator: SmartAnalystCoordinator) -> dict[str, Any]:
         "telegram": {
             "recipients": coordinator.config_state.settings.get("telegram_recipients", []),
             "service": coordinator.config_state.settings.get("telegram_service"),
+            "targets": coordinator.notification_targets(),
         },
         "history": {
             "available": snapshot.recorder_available if snapshot else False,

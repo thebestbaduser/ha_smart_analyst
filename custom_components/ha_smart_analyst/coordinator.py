@@ -572,6 +572,48 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         return None
 
     # -- доставка -----------------------------------------------------
+    def notification_targets(self) -> list[str]:
+        """Куда доставлять: notify-сущность, адреса legacy-службы или persistent.
+
+        Современный Telegram в HA создаёт notify-сущность
+        (``notify.telegram_bot_<bot>_<chat>``) — ей chat_id не нужен.
+        Старый способ — служба ``notify.<name>`` плюс chat_id получателей.
+        """
+        service = str(self.config_state.settings.get("telegram_service") or "").strip()
+        if service.startswith("notify.") and self.hass.states.get(service) is not None:
+            return [service]
+        recipients = [
+            str(item).strip()
+            for item in (self.config_state.settings.get("telegram_recipients") or [])
+            if str(item).strip()
+        ]
+        if service:
+            return recipients or ["default"]
+        return ["persistent"]
+
+    async def _async_send_via_notify(self, recipient: str, text: str) -> bool:
+        """Отправить через notify-сущность или legacy-службу."""
+        service = str(self.config_state.settings.get("telegram_service") or "").strip()
+        title = "HA Smart Analyst"
+        if service.startswith("notify.") and self.hass.states.get(service) is not None:
+            await self.hass.services.async_call(
+                "notify",
+                "send_message",
+                {"entity_id": service, "message": text, "title": title},
+                blocking=True,
+            )
+            return True
+        if not service:
+            return False
+        name = service.removeprefix("notify.")
+        data: dict[str, Any] = {"message": text, "title": title}
+        if recipient not in {"default", ""}:
+            data["target"] = recipient
+            if "telegram" in name.lower():
+                data["data"] = {"chat_id": recipient}
+        await self.hass.services.async_call("notify", name, data, blocking=True)
+        return True
+
     async def _async_notify(
         self,
         *,
@@ -581,10 +623,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         text: str,
         priority: MessagePriority,
     ) -> None:
-        recipients = list(self.config_state.settings.get("telegram_recipients") or [])
-        if not recipients:
-            recipients = ["persistent"]
-        for recipient in recipients:
+        for recipient in self.notification_targets():
             message = self.queue.enqueue(
                 event_key=event_key,
                 recipient=recipient,
@@ -598,7 +637,6 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
 
     async def _async_flush_queue(self) -> None:
         quiet = self._quiet_hours()
-        service = self.config_state.settings.get("telegram_service")
         while True:
             message = self.queue.next_message(dt_util.utcnow(), quiet)
             if message is None:
@@ -612,19 +650,14 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                 )
                 self.queue.mark_sent(message.key)
                 continue
-            if not service:
-                self.queue.suppress(message.key)
-                continue
             try:
-                await self.hass.services.async_call(
-                    "notify",
-                    str(service),
-                    {"message": message.text, "title": "HA Smart Analyst"},
-                    blocking=True,
-                )
+                sent = await self._async_send_via_notify(message.recipient, message.text)
             except Exception as err:  # noqa: BLE001 - служба уведомлений может отсутствовать
                 _LOGGER.warning("Не удалось отправить уведомление: %s", err)
                 self.queue.mark_failed(message.key, str(err), dt_util.utcnow())
+                continue
+            if not sent:
+                self.queue.suppress(message.key)
             else:
                 self.queue.mark_sent(message.key)
 
@@ -708,7 +741,9 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
             response=response,
             local_severity=local_severity,
         )
-        recipients = list(profile.recipients or self.config_state.settings.get("telegram_recipients") or ["persistent"])
+        recipients = list(
+            profile.recipients or self.notification_targets()
+        )
         for recipient in recipients:
             self.queue.enqueue(
                 event_key=f"report:{now.isoformat()}:{profile.id}",

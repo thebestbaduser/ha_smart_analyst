@@ -15,6 +15,8 @@ from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     BooleanSelector,
+    EntitySelector,
+    EntitySelectorConfig,
     NumberSelector,
     NumberSelectorConfig,
     SelectSelector,
@@ -165,10 +167,15 @@ class SmartAnalystConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="telegram",
             data_schema=vol.Schema(
                 {
-                    vol.Optional(CONF_TELEGRAM_SERVICE): _text(),
+                    vol.Optional(CONF_TELEGRAM_SERVICE): EntitySelector(
+                        EntitySelectorConfig(domain="notify")
+                    ),
                     vol.Optional(CONF_TELEGRAM_RECIPIENTS): _text(),
                 }
             ),
+            description_placeholders={
+                "notify_hint": "Настройки → Устройства и службы → Сущности → фильтр notify."
+            },
         )
 
     @staticmethod
@@ -193,6 +200,12 @@ class SmartAnalystOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data=data)
 
         current = dict(self.config_entry.options) or dict(self.config_entry.data)
+        current_service = str(current.get(CONF_TELEGRAM_SERVICE) or "")
+        service_field: Any = vol.Optional(CONF_TELEGRAM_SERVICE)
+        if current_service.startswith("notify.") and self.hass.states.get(current_service):
+            service_field = vol.Optional(
+                CONF_TELEGRAM_SERVICE, description={"suggested_value": current_service}
+            )
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -201,9 +214,7 @@ class SmartAnalystOptionsFlow(config_entries.OptionsFlow):
                         CONF_AI_ENABLED, default=bool(current.get(CONF_AI_ENABLED, True))
                     ): BooleanSelector(),
                     vol.Optional(CONF_AI_MODEL, default=current.get(CONF_AI_MODEL, DEFAULT_AI_MODEL)): _text(),
-                    vol.Optional(
-                        CONF_TELEGRAM_SERVICE, default=current.get(CONF_TELEGRAM_SERVICE) or ""
-                    ): _text(),
+                    service_field: EntitySelector(EntitySelectorConfig(domain="notify")),
                     vol.Optional(
                         CONF_TELEGRAM_RECIPIENTS,
                         default=", ".join(current.get(CONF_TELEGRAM_RECIPIENTS) or []),

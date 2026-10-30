@@ -24,10 +24,14 @@
       },
       "telegram": {
         "title": "Notifications",
-        "description": "Leave empty to use Home Assistant persistent notifications.",
+        "description": "Pick the Telegram notify entity (Settings → Devices & services → Entities → filter notify.). Recipients are only needed for the legacy notify service.",
         "data": {
-          "telegram_service": "notify service",
-          "telegram_recipients": "Recipients (comma separated)"
+          "telegram_service": "Notify entity",
+          "telegram_recipients": "Recipients (optional)"
+        },
+        "data_description": {
+          "telegram_service": "For example notify.telegram_bot_123_456. Leave empty to use Home Assistant persistent notifications.",
+          "telegram_recipients": "Comma separated chat ids, only when a legacy notify service is used instead of an entity."
         }
       }
     },
@@ -49,28 +53,50 @@
         "data": {
           "ai_enabled": "Use AI",
           "ai_model": "Model",
-          "telegram_service": "notify service",
-          "telegram_recipients": "Recipients (comma separated)",
+          "telegram_service": "Notify entity",
+          "telegram_recipients": "Recipients (optional)",
           "quiet_start": "Quiet hours start",
           "quiet_end": "Quiet hours end",
           "incident_retention_days": "Incident retention (days)"
+        },
+        "data_description": {
+          "telegram_service": "For example notify.telegram_bot_123_456. Leave empty to use Home Assistant persistent notifications.",
+          "telegram_recipients": "Comma separated chat ids, only when a legacy notify service is used instead of an entity."
         }
       }
     }
   },
   "entity": {
     "sensor": {
-      "active_incidents": { "name": "Active incidents" },
-      "critical_incidents": { "name": "Critical incidents" },
-      "queue_pending": { "name": "Pending messages" },
-      "stale_sources": { "name": "Stale sources" },
-      "rules_total": { "name": "Rules" },
-      "tokens_used": { "name": "Tokens used" },
-      "last_report": { "name": "Last report" }
+      "active_incidents": {
+        "name": "Active incidents"
+      },
+      "critical_incidents": {
+        "name": "Critical incidents"
+      },
+      "queue_pending": {
+        "name": "Pending messages"
+      },
+      "stale_sources": {
+        "name": "Stale sources"
+      },
+      "rules_total": {
+        "name": "Rules"
+      },
+      "tokens_used": {
+        "name": "Tokens used"
+      },
+      "last_report": {
+        "name": "Last report"
+      }
     },
     "binary_sensor": {
-      "ai_available": { "name": "AI available" },
-      "recorder_available": { "name": "Recorder available" }
+      "ai_available": {
+        "name": "AI available"
+      },
+      "recorder_available": {
+        "name": "Recorder available"
+      }
     }
   },
   "services": {

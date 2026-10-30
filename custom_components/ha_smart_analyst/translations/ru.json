@@ -24,10 +24,14 @@
       },
       "telegram": {
         "title": "Уведомления",
-        "description": "Оставьте пустым, чтобы использовать постоянные уведомления Home Assistant.",
+        "description": "Выберите notify-сущность Telegram (Настройки → Устройства и службы → Сущности → фильтр notify.). Получатели нужны только для старого способа через службу notify.",
         "data": {
-          "telegram_service": "Служба notify",
-          "telegram_recipients": "Получатели через запятую"
+          "telegram_service": "Notify-сущность",
+          "telegram_recipients": "Получатели (необязательно)"
+        },
+        "data_description": {
+          "telegram_service": "Например notify.telegram_bot_123_456. Оставьте пустым — будут уведомления внутри HA.",
+          "telegram_recipients": "Через запятую, только если вместо сущности указана служба notify."
         }
       }
     },
@@ -49,28 +53,50 @@
         "data": {
           "ai_enabled": "Использовать ИИ",
           "ai_model": "Модель",
-          "telegram_service": "Служба notify",
-          "telegram_recipients": "Получатели через запятую",
+          "telegram_service": "Notify-сущность",
+          "telegram_recipients": "Получатели (необязательно)",
           "quiet_start": "Начало тихих часов",
           "quiet_end": "Конец тихих часов",
           "incident_retention_days": "Хранение инцидентов, дней"
+        },
+        "data_description": {
+          "telegram_service": "Например notify.telegram_bot_123_456. Оставьте пустым — будут уведомления внутри HA.",
+          "telegram_recipients": "Через запятую, только если вместо сущности указана служба notify."
         }
       }
     }
   },
   "entity": {
     "sensor": {
-      "active_incidents": { "name": "Активные инциденты" },
-      "critical_incidents": { "name": "Критические инциденты" },
-      "queue_pending": { "name": "Сообщений в очереди" },
-      "stale_sources": { "name": "Устаревшие источники" },
-      "rules_total": { "name": "Правила" },
-      "tokens_used": { "name": "Израсходовано токенов" },
-      "last_report": { "name": "Последний отчёт" }
+      "active_incidents": {
+        "name": "Активные инциденты"
+      },
+      "critical_incidents": {
+        "name": "Критические инциденты"
+      },
+      "queue_pending": {
+        "name": "Сообщений в очереди"
+      },
+      "stale_sources": {
+        "name": "Устаревшие источники"
+      },
+      "rules_total": {
+        "name": "Правила"
+      },
+      "tokens_used": {
+        "name": "Израсходовано токенов"
+      },
+      "last_report": {
+        "name": "Последний отчёт"
+      }
     },
     "binary_sensor": {
-      "ai_available": { "name": "ИИ доступен" },
-      "recorder_available": { "name": "Recorder доступен" }
+      "ai_available": {
+        "name": "ИИ доступен"
+      },
+      "recorder_available": {
+        "name": "Recorder доступен"
+      }
     }
   },
   "services": {
