@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.ha_smart_analyst.const import DOMAIN
+from custom_components.ha_smart_analyst.const import DOMAIN, VERSION
 
 
 async def _send(client, payload: dict) -> dict:
@@ -41,7 +41,7 @@ async def test_schedule_saved_and_shown(hass, entry, hass_ws_client) -> None:
     assert saved["result"]["profile"]["report_type"] == "scheduled"
 
     overview = await _send(client, {"id": 2, "type": f"{DOMAIN}/overview"})
-    assert overview["result"]["version"] == "0.2.0"
+    assert overview["result"]["version"] == VERSION
     report = overview["result"]["reports"][0]
     assert report["schedule"] == "ежедневно, 20:00"
     assert report["next_run"] is not None
