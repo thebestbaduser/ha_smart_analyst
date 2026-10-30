@@ -1,0 +1,106 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "HA Smart Analyst",
+        "description": "Назовите экземпляр и выберите язык интерфейса.",
+        "data": {
+          "instance_name": "Название экземпляра",
+          "timezone": "Часовой пояс",
+          "language": "Язык"
+        }
+      },
+      "ai": {
+        "title": "Провайдер ИИ",
+        "description": "DeepSeek используется только для заключений. Без ключа интеграция работает на локальных правилах и шаблонных отчётах.",
+        "data": {
+          "ai_enabled": "Использовать ИИ",
+          "ai_provider": "Провайдер",
+          "ai_api_key": "API-ключ",
+          "ai_base_url": "Базовый адрес",
+          "ai_model": "Модель",
+          "ai_daily_token_budget": "Дневной лимит токенов"
+        }
+      },
+      "telegram": {
+        "title": "Уведомления",
+        "description": "Оставьте пустым, чтобы использовать постоянные уведомления Home Assistant.",
+        "data": {
+          "telegram_service": "Служба notify",
+          "telegram_recipients": "Получатели через запятую"
+        }
+      }
+    },
+    "error": {
+      "name_required": "Укажите название экземпляра.",
+      "api_key_required": "Для включённого ИИ нужен API-ключ.",
+      "invalid_auth": "API-ключ отклонён провайдером.",
+      "insufficient_balance": "На счёте провайдера недостаточно средств.",
+      "cannot_connect": "Не удалось связаться с провайдером ИИ."
+    },
+    "abort": {
+      "already_configured": "Этот экземпляр уже настроен."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Параметры HA Smart Analyst",
+        "data": {
+          "ai_enabled": "Использовать ИИ",
+          "ai_model": "Модель",
+          "telegram_service": "Служба notify",
+          "telegram_recipients": "Получатели через запятую",
+          "quiet_start": "Начало тихих часов",
+          "quiet_end": "Конец тихих часов",
+          "incident_retention_days": "Хранение инцидентов, дней"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "active_incidents": { "name": "Активные инциденты" },
+      "critical_incidents": { "name": "Критические инциденты" },
+      "queue_pending": { "name": "Сообщений в очереди" },
+      "stale_sources": { "name": "Устаревшие источники" },
+      "rules_total": { "name": "Правила" },
+      "tokens_used": { "name": "Израсходовано токенов" },
+      "last_report": { "name": "Последний отчёт" }
+    },
+    "binary_sensor": {
+      "ai_available": { "name": "ИИ доступен" },
+      "recorder_available": { "name": "Recorder доступен" }
+    }
+  },
+  "services": {
+    "generate_report": {
+      "name": "Сформировать отчёт",
+      "description": "Собрать отчёт; локальные факты не зависят от ответа модели."
+    },
+    "test_notification": {
+      "name": "Проверить уведомление",
+      "description": "Отправить тестовое сообщение через настроенный канал."
+    },
+    "run_rule_test": {
+      "name": "Проверить правило",
+      "description": "Вычислить правило на текущем снимке и вернуть причины решения."
+    },
+    "acknowledge_incident": {
+      "name": "Принять инцидент",
+      "description": "Зафиксировать подтверждение, не закрывая инцидент."
+    },
+    "resolve_incident_manually": {
+      "name": "Закрыть инцидент вручную",
+      "description": "Административное закрытие с пометкой в журнале."
+    },
+    "refresh_analysis": {
+      "name": "Обновить анализ",
+      "description": "Пересчитать правила по текущим состояниям."
+    },
+    "export_configuration": {
+      "name": "Экспортировать конфигурацию",
+      "description": "Вернуть JSON настроек без секретов."
+    }
+  }
+}

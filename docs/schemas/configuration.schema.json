@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ha-smart-analyst.local/schemas/configuration.schema.json",
+  "title": "HA Smart Analyst stored configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "model",
+    "rules",
+    "report_profiles",
+    "runtime",
+    "incidents",
+    "notifications",
+    "settings"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "model": { "$ref": "#/$defs/model" },
+    "rules": { "type": "array", "items": { "type": "object" } },
+    "report_profiles": { "type": "array", "items": { "type": "object" } },
+    "runtime": { "type": "array", "items": { "type": "object" } },
+    "incidents": { "type": "array", "items": { "type": "object" } },
+    "notifications": { "type": "array", "items": { "type": "object" } },
+    "settings": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "locale": { "enum": ["ru", "en"] },
+        "timezone": { "type": "string" },
+        "telegram_recipients": { "type": "array", "items": { "type": "string" } },
+        "ai_enabled": { "type": "boolean" },
+        "incident_retention_days": { "type": "integer", "minimum": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["site", "systems", "equipment", "measurements", "relationships"],
+      "properties": {
+        "site": { "type": ["object", "null"] },
+        "systems": { "type": "array", "items": { "type": "object" } },
+        "equipment": { "type": "array", "items": { "type": "object" } },
+        "measurements": { "type": "array", "items": { "type": "object" } },
+        "relationships": { "type": "array", "items": { "type": "object" } }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "summary": "Температура котла ниже заданной на 2,2 °C. Динамика нагрева недоступна.",
+  "attention_level": "info",
+  "observations": [
+    {
+      "text": "Цель 60,0 °C, текущее значение 57,8 °C",
+      "evidence_refs": ["fact_target_gap"]
+    }
+  ],
+  "hypotheses": [],
+  "recommendations": [],
+  "uncertainties": ["Исторические данные за отчётное окно отсутствуют"],
+  "evidence_refs": ["fact_target_gap"]
+}

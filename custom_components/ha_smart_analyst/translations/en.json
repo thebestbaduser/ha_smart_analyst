@@ -1,0 +1,106 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "HA Smart Analyst",
+        "description": "Name the instance and choose the interface language.",
+        "data": {
+          "instance_name": "Instance name",
+          "timezone": "Time zone",
+          "language": "Language"
+        }
+      },
+      "ai": {
+        "title": "AI provider",
+        "description": "DeepSeek is used only for summaries. Without a key the integration keeps working with local rules and template reports.",
+        "data": {
+          "ai_enabled": "Use AI",
+          "ai_provider": "Provider",
+          "ai_api_key": "API key",
+          "ai_base_url": "Base URL",
+          "ai_model": "Model",
+          "ai_daily_token_budget": "Daily token budget"
+        }
+      },
+      "telegram": {
+        "title": "Notifications",
+        "description": "Leave empty to use Home Assistant persistent notifications.",
+        "data": {
+          "telegram_service": "notify service",
+          "telegram_recipients": "Recipients (comma separated)"
+        }
+      }
+    },
+    "error": {
+      "name_required": "Instance name is required.",
+      "api_key_required": "API key is required when AI is enabled.",
+      "invalid_auth": "The API key was rejected.",
+      "insufficient_balance": "The provider account has insufficient balance.",
+      "cannot_connect": "Could not reach the AI provider."
+    },
+    "abort": {
+      "already_configured": "This instance is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HA Smart Analyst options",
+        "data": {
+          "ai_enabled": "Use AI",
+          "ai_model": "Model",
+          "telegram_service": "notify service",
+          "telegram_recipients": "Recipients (comma separated)",
+          "quiet_start": "Quiet hours start",
+          "quiet_end": "Quiet hours end",
+          "incident_retention_days": "Incident retention (days)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "active_incidents": { "name": "Active incidents" },
+      "critical_incidents": { "name": "Critical incidents" },
+      "queue_pending": { "name": "Pending messages" },
+      "stale_sources": { "name": "Stale sources" },
+      "rules_total": { "name": "Rules" },
+      "tokens_used": { "name": "Tokens used" },
+      "last_report": { "name": "Last report" }
+    },
+    "binary_sensor": {
+      "ai_available": { "name": "AI available" },
+      "recorder_available": { "name": "Recorder available" }
+    }
+  },
+  "services": {
+    "generate_report": {
+      "name": "Generate report",
+      "description": "Build a report; local facts never depend on the model answer."
+    },
+    "test_notification": {
+      "name": "Test notification",
+      "description": "Send a test message through the configured channel."
+    },
+    "run_rule_test": {
+      "name": "Test rule",
+      "description": "Evaluate a rule on the current snapshot and return the reasons."
+    },
+    "acknowledge_incident": {
+      "name": "Acknowledge incident",
+      "description": "Record acknowledgement without closing the incident."
+    },
+    "resolve_incident_manually": {
+      "name": "Resolve incident manually",
+      "description": "Administrative closure with an audit note."
+    },
+    "refresh_analysis": {
+      "name": "Refresh analysis",
+      "description": "Re-evaluate rules against current states."
+    },
+    "export_configuration": {
+      "name": "Export configuration",
+      "description": "Return configuration JSON without secrets."
+    }
+  }
+}

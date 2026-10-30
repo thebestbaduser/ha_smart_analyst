@@ -1,0 +1,126 @@
+{
+  "site": {
+    "id": "site_main",
+    "name": "Дом",
+    "description": "Основной объект",
+    "tags": ["demo"],
+    "report_visible": true,
+    "config_status": "confirmed"
+  },
+  "systems": [
+    {
+      "id": "system_power",
+      "site_id": "site_main",
+      "name": "Электрика",
+      "preset": "electricity",
+      "description": "Три фазы, вводной автомат",
+      "tags": [],
+      "report_visible": true,
+      "config_status": "confirmed"
+    },
+    {
+      "id": "system_heating",
+      "site_id": "site_main",
+      "name": "Отопление",
+      "preset": "heating",
+      "description": "Котёл и контур",
+      "tags": [],
+      "report_visible": true,
+      "config_status": "confirmed"
+    }
+  ],
+  "equipment": [
+    {
+      "id": "equipment_boiler",
+      "system_id": "system_heating",
+      "name": "Котёл",
+      "kind": "boiler",
+      "description": "",
+      "tags": [],
+      "report_visible": true,
+      "config_status": "confirmed"
+    }
+  ],
+  "measurements": [
+    {
+      "id": "voltage_l1",
+      "name": "Напряжение L1",
+      "role": "voltage_phase",
+      "unit": "V",
+      "system_id": "system_power",
+      "equipment_id": null,
+      "description": "",
+      "tags": [],
+      "report_visible": true,
+      "config_status": "confirmed",
+      "source": {
+        "entity_id": "sensor.l1_voltage",
+        "registry_entry_id": "registry-l1",
+        "attribute": null
+      },
+      "composite": null
+    },
+    {
+      "id": "boiler_supply",
+      "name": "Подача котла",
+      "role": "supply",
+      "unit": "°C",
+      "system_id": "system_heating",
+      "equipment_id": "equipment_boiler",
+      "description": "",
+      "tags": [],
+      "report_visible": true,
+      "config_status": "confirmed",
+      "source": {
+        "entity_id": "sensor.boiler_supply",
+        "registry_entry_id": "registry-boiler",
+        "attribute": null
+      },
+      "composite": null
+    },
+    {
+      "id": "boiler_target",
+      "name": "Цель котла",
+      "role": "setpoint",
+      "unit": "°C",
+      "system_id": "system_heating",
+      "equipment_id": "equipment_boiler",
+      "description": "",
+      "tags": [],
+      "report_visible": true,
+      "config_status": "confirmed",
+      "source": {
+        "entity_id": "number.boiler_target",
+        "registry_entry_id": "registry-target",
+        "attribute": null
+      },
+      "composite": null
+    },
+    {
+      "id": "leak",
+      "name": "Протечка",
+      "role": "leak",
+      "unit": null,
+      "system_id": "system_heating",
+      "equipment_id": null,
+      "description": "",
+      "tags": [],
+      "report_visible": true,
+      "config_status": "confirmed",
+      "source": {
+        "entity_id": "binary_sensor.leak",
+        "registry_entry_id": "registry-leak",
+        "attribute": null
+      },
+      "composite": null
+    }
+  ],
+  "relationships": [
+    {
+      "id": "relationship_1",
+      "type": "measures",
+      "source_id": "boiler_supply",
+      "target_id": "equipment_boiler"
+    }
+  ]
+}

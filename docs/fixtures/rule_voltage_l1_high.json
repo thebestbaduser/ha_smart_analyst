@@ -1,0 +1,26 @@
+{
+  "id": "rule_voltage_l1_high",
+  "name": "Перенапряжение L1",
+  "description": "Порог задаётся пользователем; значения ниже условные.",
+  "version": 1,
+  "enabled": true,
+  "severity": "warning",
+  "scope_id": "system_power",
+  "expression": {
+    "all": [
+      {
+        "op": "gt",
+        "left": { "measurement_id": "voltage_l1" },
+        "right": { "value": 245, "unit": "V" }
+      },
+      { "op": "duration_true", "seconds": 30 }
+    ]
+  },
+  "recovery": {
+    "clear_below": { "value": 242, "unit": "V" },
+    "stable_seconds": 60,
+    "measurement_id": "voltage_l1"
+  },
+  "missing_data_policy": "unknown",
+  "notify": { "repeat_seconds": 3600, "on_recovery": true }
+}

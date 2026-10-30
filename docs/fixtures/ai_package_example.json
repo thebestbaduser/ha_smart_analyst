@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "site_id": "site_main",
+  "generated_at": "2026-10-30T20:00:00+04:00",
+  "report_window": {
+    "start": "2026-10-30T19:30:00+04:00",
+    "end": "2026-10-30T20:00:00+04:00"
+  },
+  "systems": [
+    {
+      "id": "system_heating",
+      "name": "Отопление",
+      "measurements": [
+        {
+          "id": "boiler_supply",
+          "name": "Подача котла",
+          "role": "supply",
+          "value": 57.8,
+          "unit": "°C",
+          "quality": "ok"
+        },
+        {
+          "id": "boiler_target",
+          "name": "Цель котла",
+          "role": "setpoint",
+          "value": 60.0,
+          "unit": "°C",
+          "quality": "ok"
+        }
+      ],
+      "facts": [
+        {
+          "id": "fact_target_gap",
+          "kind": "difference",
+          "value": -2.2,
+          "unit": "°C",
+          "label": "Подача котла − Цель котла"
+        }
+      ],
+      "history": { "coverage": 0.0, "trend": null }
+    }
+  ],
+  "incidents": [],
+  "constraints": [
+    "Do not claim a trend without history",
+    "Use only supplied facts",
+    "Do not lower local incident severity",
+    "Do not invent numbers, thresholds or events"
+  ]
+}

@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ha-smart-analyst.local/schemas/ai-package.schema.json",
+  "title": "HA Smart Analyst AI request package",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "site_id",
+    "generated_at",
+    "report_window",
+    "systems",
+    "incidents",
+    "constraints"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "site_id": { "type": "string", "minLength": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "report_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "string", "format": "date-time" },
+        "end": { "type": "string", "format": "date-time" }
+      }
+    },
+    "systems": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "measurements", "facts", "history"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "measurements": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "name", "role", "value", "unit", "quality"],
+              "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "role": {
+                  "enum": [
+                    "actual",
+                    "setpoint",
+                    "supply",
+                    "return",
+                    "power",
+                    "energy",
+                    "voltage_phase",
+                    "mode",
+                    "running",
+                    "fault",
+                    "flow",
+                    "pressure",
+                    "temperature_indoor",
+                    "temperature_outdoor",
+                    "occupancy",
+                    "leak",
+                    "custom"
+                  ]
+                },
+                "value": { "type": ["number", "string", "boolean", "null"] },
+                "unit": { "type": ["string", "null"] },
+                "quality": {
+                  "enum": ["ok", "stale", "unknown", "unavailable", "invalid", "unconfigured", "history_missing"]
+                }
+              }
+            }
+          },
+          "facts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "kind", "value", "unit", "label"],
+              "properties": {
+                "id": { "type": "string" },
+                "kind": { "type": "string" },
+                "value": { "type": ["number", "string", "boolean", "null"] },
+                "unit": { "type": ["string", "null"] },
+                "label": { "type": "string" }
+              }
+            }
+          },
+          "history": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["coverage", "trend"],
+            "properties": {
+              "coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+              "trend": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "incidents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["id", "rule", "severity", "state"],
+        "properties": {
+          "id": { "type": "string" },
+          "rule": { "type": "string" },
+          "severity": { "enum": ["info", "warning", "critical"] },
+          "state": { "enum": ["open", "acknowledged", "recovering", "escalated", "resolved"] }
+        }
+      }
+    },
+    "constraints": { "type": "array", "items": { "type": "string" } }
+  }
+}

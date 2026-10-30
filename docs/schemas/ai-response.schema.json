@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ha-smart-analyst.local/schemas/ai-response.schema.json",
+  "title": "HA Smart Analyst AI response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "attention_level"],
+  "properties": {
+    "summary": { "type": "string", "minLength": 1 },
+    "attention_level": { "enum": ["info", "warning", "critical"] },
+    "observations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/textItem" }
+    },
+    "hypotheses": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/textItem" }
+    },
+    "recommendations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/textItem" }
+    },
+    "uncertainties": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "textItem": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["text"],
+          "properties": {
+            "text": { "type": "string", "minLength": 1 },
+            "evidence_refs": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

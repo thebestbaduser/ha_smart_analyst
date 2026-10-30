@@ -1,0 +1,111 @@
+generate_report:
+  name: Сформировать отчёт
+  description: Собрать отчёт по профилю; локальные факты не зависят от ответа ИИ.
+  fields:
+    entry_id:
+      name: Экземпляр
+      description: Идентификатор config entry, если настроено несколько экземпляров.
+      example: 01J8Z9V6T7
+      selector:
+        text:
+    profile_id:
+      name: Профиль
+      description: Идентификатор профиля отчёта; по умолчанию первый профиль.
+      selector:
+        text:
+    use_ai:
+      name: Использовать ИИ
+      description: Выключить, чтобы получить шаблонный отчёт без обращения к DeepSeek.
+      selector:
+        boolean:
+
+test_notification:
+  name: Проверить уведомление
+  description: Отправить тестовое сообщение получателю через настроенный канал.
+  fields:
+    entry_id:
+      name: Экземпляр
+      selector:
+        text:
+    recipient:
+      name: Получатель
+      description: "persistent для уведомления HA или chat_id службы notify."
+      required: true
+      selector:
+        text:
+    message:
+      name: Текст
+      selector:
+        text:
+
+run_rule_test:
+  name: Проверить правило
+  description: Вычислить правило на текущем снимке и вернуть причины решения.
+  fields:
+    entry_id:
+      name: Экземпляр
+      selector:
+        text:
+    rule_id:
+      name: Правило
+      required: true
+      selector:
+        text:
+
+acknowledge_incident:
+  name: Принять инцидент
+  description: Зафиксировать подтверждение; инцидент остаётся активным.
+  fields:
+    entry_id:
+      name: Экземпляр
+      selector:
+        text:
+    incident_id:
+      name: Инцидент
+      required: true
+      selector:
+        text:
+    by:
+      name: Кто принял
+      selector:
+        text:
+
+resolve_incident_manually:
+  name: Закрыть инцидент вручную
+  description: Административное закрытие с пометкой в журнале.
+  fields:
+    entry_id:
+      name: Экземпляр
+      selector:
+        text:
+    incident_id:
+      name: Инцидент
+      required: true
+      selector:
+        text:
+    by:
+      name: Кто закрыл
+      selector:
+        text:
+    note:
+      name: Причина
+      selector:
+        text:
+
+refresh_analysis:
+  name: Обновить анализ
+  description: Пересчитать правила по текущему состоянию источников.
+  fields:
+    entry_id:
+      name: Экземпляр
+      selector:
+        text:
+
+export_configuration:
+  name: Экспортировать конфигурацию
+  description: Вернуть JSON настроек без секретов.
+  fields:
+    entry_id:
+      name: Экземпляр
+      selector:
+        text:
