@@ -1,6 +1,12 @@
 {
   "domain": "ha_smart_analyst",
   "name": "HA Smart Analyst",
+  "after_dependencies": [
+    "frontend",
+    "panel_custom",
+    "persistent_notification",
+    "recorder"
+  ],
   "codeowners": [
     "@thebestbaduser"
   ],
@@ -8,12 +14,6 @@
   "dependencies": [
     "http",
     "websocket_api"
-  ],
-  "after_dependencies": [
-    "frontend",
-    "panel_custom",
-    "persistent_notification",
-    "recorder"
   ],
   "documentation": "https://github.com/thebestbaduser/ha_smart_analyst",
   "integration_type": "service",

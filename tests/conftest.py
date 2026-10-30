@@ -31,20 +31,20 @@ else:
 
 @pytest.fixture(scope="session", autouse=True)
 def _force_threaded_resolver():
-    """На Windows aiodns/pycares оставляет служебный поток и требует Selector loop.
+    """Заменить aiodns на потоковый резолвер.
 
-    Тестовому WebSocket-клиенту не нужен DNS: подменяем резолвер на потоковый,
-    чтобы не тащить pycares в тестовый контур.
+    Тестовому WebSocket-клиенту DNS не нужен, а pycares оставляет служебный
+    поток, который ломает проверку утечек pytest-homeassistant-custom-component
+    на всех платформах.
     """
-    if sys.platform == "win32":
-        try:
-            import aiohttp.connector
-            import aiohttp.resolver
-        except ImportError:  # быстрый контур без aiohttp
-            pass
-        else:
-            aiohttp.connector.DefaultResolver = aiohttp.resolver.ThreadedResolver
-            aiohttp.resolver.DefaultResolver = aiohttp.resolver.ThreadedResolver
+    try:
+        import aiohttp.connector
+        import aiohttp.resolver
+    except ImportError:  # быстрый контур без aiohttp
+        pass
+    else:
+        aiohttp.connector.DefaultResolver = aiohttp.resolver.ThreadedResolver
+        aiohttp.resolver.DefaultResolver = aiohttp.resolver.ThreadedResolver
     yield
 
 
