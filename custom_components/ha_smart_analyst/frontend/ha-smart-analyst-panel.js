@@ -332,11 +332,38 @@ class HaSmartAnalystPanel extends HTMLElement {
         false,
         true
       );
-      this._reportText = response ? response.text : "";
+      const payload = this._servicePayload(response);
+      const text = payload.text || "";
+      if (!text) {
+        this._fail(
+          "Сервис вернул пустой отчёт: " + JSON.stringify(response || {}).slice(0, 300)
+        );
+        return;
+      }
+      this._reportText = text;
       this._open("report");
     } catch (err) {
       this._fail(err);
     }
+  }
+
+  _servicePayload(response) {
+    if (!response) {
+      return {};
+    }
+    if (typeof response === "string") {
+      return { text: response };
+    }
+    if (typeof response.text === "string") {
+      return response;
+    }
+    if (response.response && typeof response.response === "object") {
+      return response.response;
+    }
+    if (response.service_response && typeof response.service_response === "object") {
+      return response.service_response;
+    }
+    return response;
   }
 
   async _acknowledge(incidentId) {
@@ -362,7 +389,8 @@ class HaSmartAnalystPanel extends HTMLElement {
         false,
         true
       );
-      const results = (response && response.results) || [];
+      const payload = this._servicePayload(response);
+      const results = payload.results || [];
       const failed = results.filter((item) => !item.sent);
       if (failed.length) {
         this._fail(
