@@ -4,10 +4,11 @@
   "codeowners": ["@thebestbaduser"],
   "config_flow": true,
   "dependencies": ["http", "websocket_api"],
+  "after_dependencies": ["recorder"],
   "documentation": "https://github.com/thebestbaduser/ha_smart_analyst",
   "integration_type": "service",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/thebestbaduser/ha_smart_analyst/issues",
   "requirements": [],
-  "version": "0.1.0"
+  "version": "0.1.1"
 }
