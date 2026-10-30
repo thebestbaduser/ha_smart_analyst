@@ -58,8 +58,8 @@ SERVICE_GENERATE_REPORT_SCHEMA = vol.Schema(
 SERVICE_TEST_NOTIFICATION_SCHEMA = vol.Schema(
     {
         **_ENTRY_FIELD,
-        vol.Required(ATTR_RECIPIENT): str,
-        vol.Optional(ATTR_MESSAGE, default="Проверка канала уведомлений"): str,
+        vol.Optional(ATTR_RECIPIENT): str,
+        vol.Optional(ATTR_MESSAGE, default="Проверка уведомлений HA Smart Analyst"): str,
     }
 )
 SERVICE_RULE_TEST_SCHEMA = vol.Schema({**_ENTRY_FIELD, vol.Required(ATTR_RULE_ID): str})
@@ -97,9 +97,11 @@ async def async_register_services(hass: HomeAssistant) -> None:
             "attention": rendered.attention.value,
         }
 
-    async def handle_test_notification(call: ServiceCall) -> None:
+    async def handle_test_notification(call: ServiceCall) -> ServiceResponse:
         coordinator = _coordinator(hass, call)
-        await coordinator.async_test_notification(call.data[ATTR_RECIPIENT], call.data[ATTR_MESSAGE])
+        recipient = call.data.get(ATTR_RECIPIENT)
+        text = call.data.get(ATTR_MESSAGE) or "Проверка уведомлений HA Smart Analyst"
+        return await coordinator.async_send_test_notification(text, recipient)
 
     async def handle_run_rule_test(call: ServiceCall) -> ServiceResponse:
         coordinator = _coordinator(hass, call)
@@ -136,7 +138,7 @@ async def async_register_services(hass: HomeAssistant) -> None:
 
     registrations: tuple[tuple[str, Any, Any, SupportsResponse], ...] = (
         (SERVICE_GENERATE_REPORT, handle_generate_report, SERVICE_GENERATE_REPORT_SCHEMA, SupportsResponse.OPTIONAL),
-        (SERVICE_TEST_NOTIFICATION, handle_test_notification, SERVICE_TEST_NOTIFICATION_SCHEMA, SupportsResponse.NONE),
+        (SERVICE_TEST_NOTIFICATION, handle_test_notification, SERVICE_TEST_NOTIFICATION_SCHEMA, SupportsResponse.OPTIONAL),
         (SERVICE_RUN_RULE_TEST, handle_run_rule_test, SERVICE_RULE_TEST_SCHEMA, SupportsResponse.OPTIONAL),
         (SERVICE_ACKNOWLEDGE_INCIDENT, handle_acknowledge, SERVICE_ACK_SCHEMA, SupportsResponse.OPTIONAL),
         (SERVICE_RESOLVE_INCIDENT, handle_resolve, SERVICE_RESOLVE_SCHEMA, SupportsResponse.OPTIONAL),

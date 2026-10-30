@@ -97,6 +97,7 @@ from .provider import DeepSeekProvider, ProviderConfig, ProviderError
 _LOGGER = logging.getLogger(__name__)
 
 HISTORY_DEFAULT_WINDOW = 3_600
+DEFAULT_TEST_TEXT = "Проверка уведомлений HA Smart Analyst"
 
 
 @dataclass
@@ -146,6 +147,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         self._ai_error: str | None = None
         self._last_report_at: datetime | None = None
         self._tokens_used = 0
+        self.last_delivery: dict[str, Any] | None = None
 
     # -- жизненный цикл -----------------------------------------------
     async def async_initialize(self) -> None:
@@ -595,6 +597,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         """Отправить через notify-сущность или legacy-службу."""
         service = str(self.config_state.settings.get("telegram_service") or "").strip()
         title = "HA Smart Analyst"
+        name = service.removeprefix("notify.") if service.startswith("notify.") else service
         if service.startswith("notify.") and self.hass.states.get(service) is not None:
             await self.hass.services.async_call(
                 "notify",
@@ -605,7 +608,10 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
             return True
         if not service:
             return False
-        name = service.removeprefix("notify.")
+        if not self.hass.services.has_service("notify", name):
+            raise SmartAnalystError(
+                f"не найдена ни уведомляющая сущность {service!r}, ни служба notify.{name}"
+            )
         data: dict[str, Any] = {"message": text, "title": title}
         if recipient not in {"default", ""}:
             data["target"] = recipient
@@ -613,6 +619,58 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                 data["data"] = {"chat_id": recipient}
         await self.hass.services.async_call("notify", name, data, blocking=True)
         return True
+
+    async def async_send_test_notification(
+        self, text: str = DEFAULT_TEST_TEXT, recipient: str | None = None
+    ) -> dict[str, Any]:
+        """Отправить проверку и вернуть результат по каждому адресу.
+
+        Результат показывается в панели, сервисе и сущности-кнопке: «принято
+        службой notify» значит только, что HA принял вызов; доставку в Telegram
+        контролирует интеграция Telegram.
+        """
+        now = dt_util.utcnow()
+        targets = [recipient] if recipient else self.notification_targets()
+        results: list[dict[str, Any]] = []
+        for target in targets:
+            if target == "persistent":
+                persistent_notification.async_create(
+                    self.hass,
+                    text,
+                    title="HA Smart Analyst: проверка",
+                    notification_id=f"{DOMAIN}_test_{int(now.timestamp())}",
+                )
+                results.append(
+                    {"target": target, "sent": True, "detail": "внутреннее уведомление HA"}
+                )
+                continue
+            try:
+                await self._async_send_via_notify(target, text)
+            except Exception as err:  # noqa: BLE001 - ошибку показываем пользователю
+                results.append({"target": target, "sent": False, "detail": str(err)})
+            else:
+                results.append(
+                    {"target": target, "sent": True, "detail": "принято службой notify"}
+                )
+        payload = {
+            "at": now.isoformat(),
+            "ok": all(item["sent"] for item in results),
+            "results": results,
+        }
+        self.last_delivery = payload
+        external = [item for item in results if item["target"] != "persistent"]
+        if external:
+            lines = [
+                ("✅ " if item["sent"] else "❌ ") + f"{item['target']}: {item['detail']}"
+                for item in external
+            ]
+            persistent_notification.async_create(
+                self.hass,
+                "\n".join(lines),
+                title="HA Smart Analyst: результат проверки",
+                notification_id=f"{DOMAIN}_test_result",
+            )
+        return payload
 
     async def _async_notify(
         self,
@@ -660,16 +718,6 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
                 self.queue.suppress(message.key)
             else:
                 self.queue.mark_sent(message.key)
-
-    async def async_test_notification(self, recipient: str, text: str) -> None:
-        self.queue.enqueue(
-            event_key=f"test:{dt_util.utcnow().isoformat()}",
-            recipient=recipient,
-            priority=MessagePriority.INFO,
-            text=text,
-            now=dt_util.utcnow(),
-        )
-        await self._async_flush_queue()
 
     async def async_acknowledge(self, incident_id: str, by: str) -> Incident:
         incident = self.incidents.acknowledge(incident_id, by, dt_util.utcnow())

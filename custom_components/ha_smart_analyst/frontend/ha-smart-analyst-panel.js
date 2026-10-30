@@ -353,15 +353,28 @@ class HaSmartAnalystPanel extends HTMLElement {
   }
 
   async _testNotify() {
-    const targets = (this._data.telegram.targets || ["persistent"]).slice();
     try {
-      for (const target of targets) {
-        await this.hass.callService("ha_smart_analyst", "test_notification", {
-          recipient: target,
-          message: "Проверка уведомлений HA Smart Analyst",
-        });
+      const response = await this.hass.callService(
+        "ha_smart_analyst",
+        "test_notification",
+        { message: "Проверка уведомлений HA Smart Analyst" },
+        undefined,
+        false,
+        true
+      );
+      const results = (response && response.results) || [];
+      const failed = results.filter((item) => !item.sent);
+      if (failed.length) {
+        this._fail(
+          "Не доставлено: " + failed.map((item) => `${item.target}: ${item.detail}`).join("; ")
+        );
+        return;
       }
-      this._ok(`Проверочное сообщение отправлено: ${targets.join(", ")}`);
+      this._ok(
+        "Отправлено: " +
+          results.map((item) => item.target).join(", ") +
+          " (принято службой notify; доставку в Telegram контролирует интеграция Telegram)"
+      );
     } catch (err) {
       this._fail(err);
     }

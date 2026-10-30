@@ -21,7 +21,7 @@ generate_report:
 
 test_notification:
   name: Проверить уведомление
-  description: Отправить тестовое сообщение получателю через настроенный канал.
+  description: Отправить проверочное сообщение и вернуть результат по каждому адресу.
   fields:
     entry_id:
       name: Экземпляр
@@ -29,8 +29,7 @@ test_notification:
         text:
     recipient:
       name: Получатель
-      description: "persistent для уведомления HA или chat_id службы notify."
-      required: true
+      description: Необязательно. Пусто — отправить по настроенному каналу (notify-сущность или получатели).
       selector:
         text:
     message:

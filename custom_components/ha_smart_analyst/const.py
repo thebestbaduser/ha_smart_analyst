@@ -15,7 +15,11 @@ SAVE_DELAY_SECONDS: Final = 5
 SCAN_INTERVAL: Final = 30
 ASSESS_INTERVAL_SECONDS: Final = 15
 
-PLATFORMS: Final[tuple[Platform, ...]] = (Platform.SENSOR, Platform.BINARY_SENSOR)
+PLATFORMS: Final[tuple[Platform, ...]] = (
+    Platform.SENSOR,
+    Platform.BINARY_SENSOR,
+    Platform.BUTTON,
+)
 
 CONF_INSTANCE_NAME: Final = "instance_name"
 CONF_LANGUAGE: Final = "language"

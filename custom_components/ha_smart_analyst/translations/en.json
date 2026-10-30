@@ -97,6 +97,11 @@
       "recorder_available": {
         "name": "Recorder available"
       }
+    },
+    "button": {
+      "test_notification": {
+        "name": "Test notification"
+      }
     }
   },
   "services": {
@@ -106,7 +111,16 @@
     },
     "test_notification": {
       "name": "Test notification",
-      "description": "Send a test message through the configured channel."
+      "description": "Send a test message and return the result for every target.",
+      "fields": {
+        "recipient": {
+          "name": "Recipient",
+          "description": "Optional. Empty means the configured channel (notify entity or recipients)."
+        },
+        "message": {
+          "name": "Message"
+        }
+      }
     },
     "run_rule_test": {
       "name": "Test rule",
