@@ -1,14 +1,24 @@
 {
   "domain": "ha_smart_analyst",
   "name": "HA Smart Analyst",
-  "codeowners": ["@thebestbaduser"],
+  "codeowners": [
+    "@thebestbaduser"
+  ],
   "config_flow": true,
-  "dependencies": ["http", "websocket_api"],
-  "after_dependencies": ["recorder"],
+  "dependencies": [
+    "http",
+    "websocket_api"
+  ],
+  "after_dependencies": [
+    "frontend",
+    "panel_custom",
+    "persistent_notification",
+    "recorder"
+  ],
   "documentation": "https://github.com/thebestbaduser/ha_smart_analyst",
   "integration_type": "service",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/thebestbaduser/ha_smart_analyst/issues",
   "requirements": [],
-  "version": "0.1.1"
+  "version": "0.1.2"
 }

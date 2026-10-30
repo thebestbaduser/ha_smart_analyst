@@ -3,6 +3,12 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии — [SemVer](https://semver.org/lang/ru/).
 
+## [0.1.2] — 2026-10-30
+
+### Исправлено
+
+* Manifest: необязательные компоненты (`frontend`, `panel_custom`, `persistent_notification`, `recorder`) объявлены в `after_dependencies` — hassfest не считает их необъявленными зависимостями. Поведение не меняется: без панели и Recorder интеграция работает.
+
 ## [0.1.1] — 2026-10-30
 
 ### Исправлено
