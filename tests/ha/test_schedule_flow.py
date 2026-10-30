@@ -65,7 +65,12 @@ async def test_invalid_time_rejected(hass, entry, hass_ws_client) -> None:
 
 
 async def test_due_report_is_generated(hass, entry) -> None:
+    hass.states.async_set("sensor.temp", "20", {"unit_of_measurement": "°C"})
     coordinator = await _setup(hass, entry)
+    system = await coordinator.async_create_system("Климат", "climate")
+    await coordinator.async_add_measurement(
+        system_id=system.id, entity_id="sensor.temp", role="actual", unit="°C"
+    )
     await coordinator.async_save_profile(
         {
             "id": "p_due",

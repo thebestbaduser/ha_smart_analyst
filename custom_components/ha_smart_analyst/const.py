@@ -8,7 +8,7 @@ from homeassistant.const import Platform
 
 DOMAIN: Final = "ha_smart_analyst"
 NAME: Final = "HA Smart Analyst"
-VERSION: Final = "0.2.1"
+VERSION: Final = "0.3.0"
 
 STORAGE_VERSION: Final = 1
 STORAGE_KEY: Final = DOMAIN

@@ -23,6 +23,7 @@ from .ai import (
     retry_delay,
     validate_response,
 )
+from .composites import compute_composite
 from .discovery import (
     CatalogFilter,
     EntityDescriptor,
@@ -94,7 +95,10 @@ from .reports import (
     ReportProfile,
     ReportType,
     choose_detail,
+    compact_measurements,
     describe_schedule,
+    history_facts,
+    history_trend,
     next_run_at,
     parse_schedule_times,
     phase_spread,
@@ -186,10 +190,14 @@ __all__ = [
     "build_observation",
     "build_package",
     "choose_detail",
+    "compact_measurements",
     "classify_status",
+    "compute_composite",
     "convert",
     "describe_schedule",
     "digest",
+    "history_facts",
+    "history_trend",
     "evaluate",
     "evaluate_coverage",
     "evaluate_rule",

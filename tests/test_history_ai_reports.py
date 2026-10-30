@@ -36,6 +36,8 @@ from core.reports import (
     ReportProfile,
     choose_detail,
     critical_alert,
+    history_facts,
+    history_trend,
     phase_spread,
     render_report,
 )
@@ -276,3 +278,62 @@ def test_critical_alert_is_standalone() -> None:
     text = critical_alert(profile, digest(build_incident(), {"rule_voltage_l1_high": "Перенапряжение L1"}, NOW), NOW)
     assert text.startswith("🚨")
     assert "Перенапряжение L1" in text
+
+def test_compact_report_shows_key_readings() -> None:
+    profile = ReportProfile(id="compact", name="Короткий", detail=DetailLevel.COMPACT)
+    rendered = render_report(profile, build_analysis_package(), NOW)
+    assert "Ключевые показатели" in rendered.text
+    assert "57,8" in rendered.text
+
+
+def test_compact_report_without_numbers_is_honest() -> None:
+    measurement = MeasurementFact(
+        id="m1",
+        name="Неизвестно",
+        role=MeasurementRole.CUSTOM,
+        value=None,
+        unit=None,
+        quality=Quality.UNCONFIGURED,
+    )
+    section = SystemSection(id="s1", name="Пустая система", measurements=(measurement,))
+    package = build_package(
+        site_id="site",
+        now=NOW,
+        window_start=NOW - timedelta(minutes=30),
+        window_end=NOW,
+        systems=(section,),
+    )
+    profile = ReportProfile(id="compact", name="Короткий", detail=DetailLevel.COMPACT)
+    rendered = render_report(profile, package, NOW)
+    assert "Числовых показаний нет" in rendered.text
+
+
+def test_fallback_reports_ai_error_reason() -> None:
+    profile = ReportProfile(id="r", name="Отчёт", locale=Locale.RU)
+    rendered = render_report(profile, build_analysis_package(), NOW, ai_error="HTTP 401: invalid key")
+    assert "Причина: HTTP 401: invalid key" in rendered.text
+
+
+def test_history_facts_and_trend() -> None:
+    window = Window.last(NOW, 600)
+    data = samples([20.0 + index for index in range(11)], NOW - timedelta(seconds=600), 60)
+    facts = history_facts("boiler_temp", "Подача", data, window, "°C")
+    ids = {fact.id for fact in facts}
+    assert {
+        "fact_boiler_temp_delta",
+        "fact_boiler_temp_mean",
+        "fact_boiler_temp_min",
+        "fact_boiler_temp_max",
+    } <= ids
+    coverage, trend = history_trend(data, window, "°C")
+    assert coverage == pytest.approx(1.0)
+    assert trend == "рост на 10,0 °C"
+
+
+def test_history_facts_absent_without_data() -> None:
+    window = Window.last(NOW, 3_600)
+    sparse = samples([20.0, 20.5], NOW - timedelta(seconds=60), 60)
+    assert history_facts("boiler_temp", "Подача", sparse, window, "°C") == ()
+    coverage, trend = history_trend(sparse, window, "°C")
+    assert trend is None
+    assert coverage < 0.1

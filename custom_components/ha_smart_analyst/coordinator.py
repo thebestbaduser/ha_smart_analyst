@@ -80,9 +80,12 @@ from .core import (
     Window,
     build_observation,
     build_package,
+    compute_composite,
     digest,
     evaluate_rule,
     export_configuration,
+    history_facts,
+    history_trend,
     load_config,
     new_identifier,
     next_run_at,
@@ -92,6 +95,8 @@ from .core import (
     render_report,
     validate_response,
 )
+from .core.observations import unconfigured
+from .core.units import compatible, convert
 from .history_provider import CachedHistory
 from .provider import DeepSeekProvider, ProviderConfig, ProviderError
 
@@ -483,23 +488,54 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
 
     # -- оценка -------------------------------------------------------
     def build_observations(self, now: datetime) -> dict[str, Observation]:
+        """Снимок источников: атрибуты, отсутствующие сущности и составные измерения."""
         observations: dict[str, Observation] = {}
         for measurement in self.model.measurements.values():
             if measurement.source is None:
                 continue
-            state = self.hass.states.get(measurement.source.entity_id)
+            entity_id = measurement.source.entity_id
+            state = self.hass.states.get(entity_id)
+            attribute = measurement.source.attribute
             if state is None:
+                observations[measurement.id] = unconfigured(
+                    measurement.id, entity_id, now, measurement.unit
+                )
                 continue
+            raw: object = state.state
+            if attribute:
+                if attribute not in state.attributes:
+                    observations[measurement.id] = unconfigured(
+                        measurement.id, entity_id, now, measurement.unit
+                    )
+                    continue
+                raw = state.attributes.get(attribute)
             observations[measurement.id] = build_observation(
                 source_id=measurement.id,
-                entity_id=measurement.source.entity_id,
-                raw_state=state.state,
+                entity_id=entity_id,
+                raw_state=raw,
                 now=now,
                 unit=state.attributes.get("unit_of_measurement") or measurement.unit,
                 last_changed=state.last_changed,
                 last_updated=state.last_updated,
                 last_reported=getattr(state, "last_reported", None),
-                expected_numeric=measurement.kind in {"numeric", "composite"},
+                expected_numeric=measurement.kind in {"numeric", "composite"} or attribute is not None,
+            )
+
+        pending = [item for item in self.model.measurements.values() if item.composite is not None]
+        for _ in range(5):
+            progressed = False
+            for measurement in list(pending):
+                computed = compute_composite(measurement, observations)
+                if computed is None:
+                    continue
+                observations[measurement.id] = computed
+                pending.remove(measurement)
+                progressed = True
+            if not progressed:
+                break
+        for measurement in pending:
+            observations[measurement.id] = unconfigured(
+                measurement.id, f"composite:{measurement.id}", now, measurement.unit
             )
         return observations
 
@@ -534,32 +570,56 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
             while True:
                 self._pending = False
                 now = dt_util.utcnow()
-                self._history = await self._async_load_history(now)
                 observations = self.build_observations(now)
-                for rule in self.rules.values():
-                    if not rule.enabled:
-                        continue
-                    runtime = self.runtimes.setdefault(rule.id, RuleRuntime(rule.id))
-                    context = EvaluationContext(
-                        model=self.model,
-                        observations=observations,
-                        now=now,
-                        history=self._history,
-                    )
-                    try:
-                        evaluation = evaluate_rule(rule, context)
-                    except SmartAnalystError as err:
-                        _LOGGER.warning("Ошибка вычисления правила %s: %s", rule.name, err)
-                        continue
-                    events = runtime.update(rule, evaluation, now)
-                    for event in events:
-                        await self._async_handle_event(rule, runtime, event, now)
+                fast_rules = [
+                    rule
+                    for rule in self.rules.values()
+                    if rule.enabled and not _history_seconds(rule)
+                ]
+                slow_rules = [
+                    rule
+                    for rule in self.rules.values()
+                    if rule.enabled and _history_seconds(rule)
+                ]
+
+                self._history = None
+                for rule in fast_rules:
+                    await self._evaluate_rule(rule, observations, now, history=None)
+                if slow_rules:
+                    self._history = await self._async_load_history(now)
+                    for rule in slow_rules:
+                        await self._evaluate_rule(rule, observations, now, history=self._history)
+
                 self._publish_snapshot(now, observations)
                 self._schedule_save()
                 if not self._pending:
                     break
         finally:
             self._evaluating = False
+
+    async def _evaluate_rule(
+        self,
+        rule: Rule,
+        observations: dict[str, Observation],
+        now: datetime,
+        history: CachedHistory | None,
+    ) -> None:
+        """Оценить одно правило и обработать его события."""
+        runtime = self.runtimes.setdefault(rule.id, RuleRuntime(rule.id))
+        context = EvaluationContext(
+            model=self.model,
+            observations=observations,
+            now=now,
+            history=history,
+        )
+        try:
+            evaluation = evaluate_rule(rule, context)
+        except SmartAnalystError as err:
+            _LOGGER.warning("Ошибка вычисления правила %s: %s", rule.name, err)
+            return
+        events = runtime.update(rule, evaluation, now)
+        for event in events:
+            await self._async_handle_event(rule, runtime, event, now)
 
     async def _async_handle_event(
         self, rule: Rule, runtime: RuleRuntime, event: RuleEvent, now: datetime
@@ -791,7 +851,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         if rule is None:
             raise SmartAnalystError(f"неизвестное правило {rule_id!r}")
         now = dt_util.utcnow()
-        history = await self._async_load_history(now)
+        history = await self._async_load_history(now) if _history_seconds(rule) else None
         context = EvaluationContext(
             model=self.model, observations=self.build_observations(now), now=now, history=history
         )
@@ -805,7 +865,12 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         profile = self._profile(profile_id)
         observations = self.build_observations(now)
         window = Window.last(now, profile.history_seconds)
-        sections = self._build_sections(profile, observations)
+        sections = await self._async_build_sections(profile, observations, window)
+        if not sections:
+            raise SmartAnalystError(
+                "в отчёте нет ни одного показания: добавьте систему и датчики "
+                "или проверьте, что сущности доступны"
+            )
         incident_digests = tuple(
             digest(incident, {rule_id: rule.name for rule_id, rule in self.rules.items()}, now)
             for incident in self.incidents.active()
@@ -836,6 +901,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
         response: AIResponse | None = None
         if ai_enabled:
             response = await self._async_analyze(package)
+        ai_error = None if response is not None or not ai_enabled else self._ai_error
         local_severity = _max_severity(incident_digests)
         self._last_report_at = now
         rendered = render_report(
@@ -845,6 +911,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
             incidents=incident_digests,
             response=response,
             local_severity=local_severity,
+            ai_error=ai_error,
         )
         recipients = list(
             profile.recipients or self.notification_targets()
@@ -918,30 +985,70 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
             report_type=ReportType.ON_DEMAND,
         )
 
-    def _build_sections(
-        self, profile: ReportProfile, observations: dict[str, Observation]
+    async def _async_build_sections(
+        self,
+        profile: ReportProfile,
+        observations: dict[str, Observation],
+        window: Window,
     ) -> tuple[SystemSection, ...]:
+        """Собрать разделы отчёта с историей, уставками и привязкой к оборудованию."""
+        entity_map = {
+            measurement.id: measurement.source.entity_id
+            for measurement in self.model.measurements.values()
+            if measurement.source is not None
+        }
+        history: CachedHistory | None = None
+        if entity_map:
+            try:
+                history = await CachedHistory.async_load(self.hass, window, entity_map)
+            except Exception as err:  # noqa: BLE001 - без истории отчёт остаётся честным
+                _LOGGER.debug("История для отчёта недоступна: %s", err)
+
         sections: list[SystemSection] = []
         for system in self.model.systems.values():
             if profile.system_ids and system.id not in profile.system_ids:
                 continue
-            measurements = tuple(
-                MeasurementFact.from_observation(
-                    measurement.id, measurement.name, measurement.role, observations[measurement.id]
-                )
+            items = [
+                measurement
                 for measurement in self.model.measurements_of(system.id)
                 if measurement.id in observations and measurement.report_visible
-            )
-            if not measurements:
+            ]
+            if not items:
                 continue
+            facts = list(_pair_facts(items, observations))
+            coverage_values: list[float] = []
+            trend_text: str | None = None
+            numeric_items = [item for item in items if item.kind in {"numeric", "composite"}][:8]
+            if history is not None:
+                for measurement in numeric_items:
+                    samples = history.samples(measurement.id, window)
+                    unit = measurement.unit or observations[measurement.id].unit
+                    facts.extend(
+                        history_facts(measurement.id, measurement.name, samples, window, unit)
+                    )
+                    coverage, trend = history_trend(
+                        samples, window, unit, profile.locale
+                    )
+                    if coverage:
+                        coverage_values.append(coverage)
+                    if trend_text is None and trend:
+                        trend_text = trend
             sections.append(
                 SystemSection(
                     id=system.id,
                     name=system.name,
-                    measurements=measurements,
-                    facts=_system_facts(measurements),
-                    coverage=None,
-                    trend=None,
+                    measurements=tuple(
+                        MeasurementFact.from_observation(
+                            measurement.id,
+                            measurement.name,
+                            measurement.role,
+                            observations[measurement.id],
+                        )
+                        for measurement in items
+                    ),
+                    facts=tuple(facts),
+                    coverage=max(coverage_values) if coverage_values else None,
+                    trend=trend_text,
                 )
             )
         return tuple(sections)
@@ -980,7 +1087,7 @@ class SmartAnalystCoordinator(DataUpdateCoordinator[AnalystSnapshot]):
 
     def _serialize(self) -> dict[str, Any]:
         self.config_state.rules = [rule.to_dict() for rule in self.rules.values()]
-        self.config_state.runtimes = [runtime.to_dict() for runtime in self.runtimes.values()]
+        self.config_state.runtime = [runtime.to_dict() for runtime in self.runtimes.values()]
         self.config_state.incidents = self.incidents.to_list()
         self.config_state.notifications = self.queue.to_list()
         self.config_state.schema_version = STORAGE_VERSION
@@ -1016,23 +1123,47 @@ def _max_severity(digests: tuple[Any, ...]) -> Severity:
     return result
 
 
-def _system_facts(measurements: tuple[MeasurementFact, ...]) -> tuple[Fact, ...]:
-    """Пары «факт/уставка» дают рассчитанное отклонение с явным ID."""
+def _pair_facts(
+    measurements: list[Measurement], observations: dict[str, Observation]
+) -> tuple[Fact, ...]:
+    """Отклонение «факт − уставка» только внутри одного оборудования (SEM-04).
+
+    Если оборудование не задано и пара неоднозначна, факт не выдумывается.
+    """
+    groups: dict[str | None, list[Measurement]] = {}
+    for measurement in measurements:
+        groups.setdefault(measurement.equipment_id, []).append(measurement)
     facts: list[Fact] = []
-    actual = next((item for item in measurements if item.role.value == "actual"), None)
-    setpoint = next((item for item in measurements if item.role.value == "setpoint"), None)
-    if (
-        actual is not None
-        and setpoint is not None
-        and isinstance(actual.value, (int, float))
-        and isinstance(setpoint.value, (int, float))
-    ):
+    for equipment_id, group in groups.items():
+        actuals = [item for item in group if item.role is MeasurementRole.ACTUAL]
+        setpoints = [item for item in group if item.role is MeasurementRole.SETPOINT]
+        if equipment_id is None and (len(actuals) != 1 or len(setpoints) != 1):
+            continue
+        if not actuals or not setpoints:
+            continue
+        actual, setpoint = actuals[0], setpoints[0]
+        actual_observation = observations.get(actual.id)
+        setpoint_observation = observations.get(setpoint.id)
+        if (
+            actual_observation is None
+            or setpoint_observation is None
+            or actual_observation.numeric_value is None
+            or setpoint_observation.numeric_value is None
+        ):
+            continue
+        actual_unit = actual_observation.unit or actual.unit
+        setpoint_unit = setpoint_observation.unit or setpoint.unit
+        setpoint_value = setpoint_observation.numeric_value
+        if setpoint_unit and actual_unit and setpoint_unit != actual_unit:
+            if not compatible(setpoint_unit, actual_unit):
+                continue
+            setpoint_value = convert(setpoint_value, setpoint_unit, actual_unit)
         facts.append(
             Fact(
                 id=f"fact_gap_{actual.id}",
                 kind="difference",
-                value=float(actual.value) - float(setpoint.value),
-                unit=actual.unit,
+                value=round(actual_observation.numeric_value - setpoint_value, 3),
+                unit=actual_unit,
                 label=f"{actual.name} − {setpoint.name}",
             )
         )

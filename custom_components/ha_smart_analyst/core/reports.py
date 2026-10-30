@@ -13,9 +13,11 @@ from datetime import UTC, datetime, time, timedelta, tzinfo
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
-from .ai import AIResponse, AnalysisPackage, SystemSection
+from .ai import AIResponse, AnalysisPackage, Fact, MeasurementFact, SystemSection
 from .engine import Severity
+from .history import Sample, Window, summarize
 from .incidents import IncidentDigest
+from .model import MeasurementRole
 from .observations import Quality
 
 #: Дни недели в порядке Python: 0 — понедельник, 6 — воскресенье.
@@ -239,6 +241,101 @@ def format_number(value: float, unit: str | None = None, locale: Locale = Locale
     return f"{text} {unit}" if unit else text
 
 
+#: Порядок важности показателей в компактном отчёте.
+_ROLE_PRIORITY = {
+    MeasurementRole.LEAK: 0,
+    MeasurementRole.FAULT: 0,
+    MeasurementRole.ACTUAL: 1,
+    MeasurementRole.SUPPLY: 2,
+    MeasurementRole.RETURN: 3,
+    MeasurementRole.SETPOINT: 4,
+    MeasurementRole.TEMPERATURE_INDOOR: 5,
+    MeasurementRole.TEMPERATURE_OUTDOOR: 6,
+    MeasurementRole.POWER: 7,
+    MeasurementRole.ENERGY: 8,
+    MeasurementRole.VOLTAGE_PHASE: 9,
+    MeasurementRole.PRESSURE: 10,
+    MeasurementRole.FLOW: 11,
+    MeasurementRole.RUNNING: 12,
+    MeasurementRole.MODE: 13,
+    MeasurementRole.OCCUPANCY: 14,
+    MeasurementRole.CUSTOM: 15,
+}
+
+
+def compact_measurements(
+    systems: Sequence[SystemSection], limit: int = 8
+) -> list[tuple[str, MeasurementFact]]:
+    """Ключевые числовые показатели для короткого отчёта.
+
+    Компактный отчёт показывает главное, а не молчит: даже при нормальном
+    состоянии дома пользователь видит температуры, мощность и уставки.
+    """
+    items: list[tuple[int, str, MeasurementFact]] = []
+    for system in systems:
+        for measurement in system.measurements:
+            value = measurement.value
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                items.append(
+                    (_ROLE_PRIORITY.get(measurement.role, 99), system.name, measurement)
+                )
+    items.sort(key=lambda item: item[0])
+    return [(system_name, measurement) for _, system_name, measurement in items[:limit]]
+
+
+def history_facts(
+    measurement_id: str,
+    name: str,
+    samples: Sequence[Sample],
+    window: Window,
+    unit: str | None = None,
+) -> tuple[Fact, ...]:
+    """Локально рассчитанные факты истории с идентификаторами для ссылок ИИ."""
+    aggregate = summarize(samples, window)
+    if not aggregate.usable:
+        return ()
+    prefix = f"fact_{measurement_id}"
+    facts: list[Fact] = []
+    if aggregate.delta is not None:
+        facts.append(
+            Fact(
+                f"{prefix}_delta",
+                "delta",
+                round(aggregate.delta, 3),
+                unit,
+                f"{name}: изменение за период",
+            )
+        )
+    if aggregate.mean is not None:
+        facts.append(
+            Fact(f"{prefix}_mean", "mean", round(aggregate.mean, 3), unit, f"{name}: среднее")
+        )
+    if aggregate.minimum is not None:
+        facts.append(
+            Fact(f"{prefix}_min", "min", round(aggregate.minimum, 3), unit, f"{name}: минимум")
+        )
+    if aggregate.maximum is not None:
+        facts.append(
+            Fact(f"{prefix}_max", "max", round(aggregate.maximum, 3), unit, f"{name}: максимум")
+        )
+    return tuple(facts)
+
+
+def history_trend(
+    samples: Sequence[Sample], window: Window, unit: str | None, locale: Locale = Locale.RU
+) -> tuple[float | None, str | None]:
+    """Покрытие и текст тренда; при недостатке данных — ``None``."""
+    aggregate = summarize(samples, window)
+    if not aggregate.usable or aggregate.delta is None:
+        return aggregate.coverage, None
+    if abs(aggregate.delta) < 1e-9:
+        return aggregate.coverage, ("без изменений" if locale is Locale.RU else "stable")
+    amount = format_number(abs(aggregate.delta), unit, locale)
+    if locale is Locale.RU:
+        return aggregate.coverage, ("рост на " if aggregate.delta > 0 else "снижение на ") + amount
+    return aggregate.coverage, ("up by " if aggregate.delta > 0 else "down by ") + amount
+
+
 def format_duration(seconds: float | None, locale: Locale = Locale.RU) -> str:
     """Длительность в человекочитаемом виде."""
     if seconds is None:
@@ -385,13 +482,16 @@ def _incident_lines(incidents: Sequence[IncidentDigest], locale: Locale) -> list
     return lines
 
 
-def _fallback_lines(package: AnalysisPackage, locale: Locale) -> list[str]:
+def _fallback_lines(
+    package: AnalysisPackage, locale: Locale, ai_error: str | None = None
+) -> list[str]:
     """Шаблонный отчёт без ИИ (AI-07, AC-11)."""
+    reason = f" Причина: {ai_error}." if ai_error else ""
     if locale is Locale.RU:
         lines = [
             "",
             "**Аналитическое заключение недоступно**",
-            "ИИ не ответил или ответ не прошёл проверку. Ниже — локальные факты.",
+            f"ИИ не ответил или ответ не прошёл проверку.{reason} Ниже — локальные факты.",
         ]
         degraded = any(
             measurement.quality is not Quality.OK
@@ -404,8 +504,42 @@ def _fallback_lines(package: AnalysisPackage, locale: Locale) -> list[str]:
     return [
         "",
         "**AI summary unavailable**",
-        "The model did not answer or its response failed validation. Local facts follow.",
+        f"The model did not answer or its response failed validation.{reason} Local facts follow.",
     ]
+
+
+def _compact_lines(package: AnalysisPackage, locale: Locale) -> list[str]:
+    """Короткая сводка с ключевыми цифрами — показывается всегда (REP-04)."""
+    selected = compact_measurements(package.systems)
+    if locale is Locale.RU:
+        lines = ["", "**Ключевые показатели**"]
+        if not selected:
+            lines.append("• Числовых показаний нет — проверьте, что датчики добавлены и доступны.")
+            return lines
+        for system_name, measurement in selected:
+            quality = (
+                ""
+                if measurement.quality is Quality.OK
+                else f" [{_QUALITY_RU[measurement.quality]}]"
+            )
+            lines.append(
+                f"• {system_name}: {measurement.name} — "
+                f"{format_number(float(measurement.value), measurement.unit, locale)}{quality}"
+            )
+        return lines
+    lines = ["", "**Key readings**"]
+    if not selected:
+        lines.append("• No numeric readings — check that sensors are added and available.")
+        return lines
+    for system_name, measurement in selected:
+        quality = (
+            "" if measurement.quality is Quality.OK else f" [{_QUALITY_EN[measurement.quality]}]"
+        )
+        lines.append(
+            f"• {system_name}: {measurement.name} — "
+            f"{format_number(float(measurement.value), measurement.unit, locale)}{quality}"
+        )
+    return lines
 
 
 def _ai_lines(
@@ -446,6 +580,7 @@ def render_report(
     response: AIResponse | None = None,
     local_severity: Severity = Severity.INFO,
     detail: DetailLevel | None = None,
+    ai_error: str | None = None,
 ) -> RenderedReport:
     """Собрать текст отчёта: факты локально, ИИ — отдельным блоком."""
     data_quality_issue = any(
@@ -458,7 +593,9 @@ def render_report(
     detailed = chosen in {DetailLevel.STANDARD, DetailLevel.DETAILED}
     lines = _header(profile, package, now)
 
-    if chosen is not DetailLevel.COMPACT:
+    if chosen is DetailLevel.COMPACT:
+        lines.extend(_compact_lines(package, locale))
+    else:
         lines.append("")
         lines.append("**Системы**" if locale is Locale.RU else "**Systems**")
         for system in package.systems:
@@ -475,7 +612,7 @@ def render_report(
         attention = apply_attention_floor(local_severity, response)
         lines.extend(_ai_lines(response, locale, attention))
     else:
-        lines.extend(_fallback_lines(package, locale))
+        lines.extend(_fallback_lines(package, locale, ai_error))
 
     warnings: list[str] = []
     unverified = response.unverified_numbers if response else ()
