@@ -29,4 +29,4 @@ jobs:
       - name: Lint
         run: ruff check custom_components tests
       - name: Tests (core, contracts, Home Assistant)
-        run: pytest tests -q
+        run: python -m pytest tests -q

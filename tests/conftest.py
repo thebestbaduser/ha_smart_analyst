@@ -15,8 +15,10 @@ from pathlib import Path
 import pytest
 
 COMPONENT_DIR = Path(__file__).parents[1] / "custom_components" / "ha_smart_analyst"
-if str(COMPONENT_DIR) not in sys.path:
-    sys.path.insert(0, str(COMPONENT_DIR))
+PROJECT_ROOT = Path(__file__).parents[1]
+for path in (PROJECT_ROOT, COMPONENT_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 try:
     import pytest_homeassistant_custom_component  # noqa: F401
